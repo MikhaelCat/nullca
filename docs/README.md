@@ -37,3 +37,10 @@ NullCA is an observability and protocol dissection platform designed to capture 
    - Passive security posture and header hygiene evaluation (HSTS, CORS, CSP, Cookies, Leaks).
    - Automated OpenAPI 3.0.3 specification synthesis and recursive JSON schema inference.
    - NSS `SSLKEYLOGFILE` streaming and Wireshark integration.
+
+6. **[Interactive Terminal Cockpit Guide (`docs/ui/`)](./ui/README.md)**
+   - Complete Cockpit architecture and Ratatui TUI wire inspector layout.
+   - **[Keyboard & Mouse Shortcuts](./ui/KEYBOARD_AND_SHORTCUTS.md)**: Navigation, fullscreen panes, hotkeys.
+   - **[Request Repeater & Live Tamper](./ui/REPEATER_AND_TAMPER.md)**: Built-in Burp Repeater for CLI with latency telemetry.
+   - **[Inspector Tabs 1-7](./ui/INSPECTOR_TABS.md)**: Headers, Protobuf, Secrets/Flags, cURL, WebSocket, X.509 PKI, and Diff.
+   - **[Filter DSL Guide](./ui/FILTER_DSL_GUIDE.md)**: In-memory live packet query expressions, fields, and history.

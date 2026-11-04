@@ -372,6 +372,53 @@ impl FilterEngine {
                     false
                 }
             }
+            "status" | "code" => {
+                if let Value::Number(n) = val {
+                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        if let crate::proto::http1::Http1Message::Response { status_code, .. } = msg {
+                            return compare_num(status_code as i64, op, *n);
+                        }
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            "method" => {
+                if let Value::String(s) = val {
+                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        if let crate::proto::http1::Http1Message::Request { method, .. } = msg {
+                            return compare_str(&method, op, s);
+                        }
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            "path" | "uri" => {
+                if let Value::String(s) = val {
+                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        if let crate::proto::http1::Http1Message::Request { uri, .. } = msg {
+                            return compare_str(&uri, op, s);
+                        }
+                    }
+                    false
+                } else {
+                    false
+                }
+            }
+            "dir" | "direction" => {
+                let d_str = match event.direction {
+                    crate::engine::event::Direction::Ingress => "in",
+                    crate::engine::event::Direction::Egress => "out",
+                };
+                if let Value::String(s) = val {
+                    compare_str(d_str, op, s)
+                } else {
+                    false
+                }
+            }
             _ => true,
         }
     }
