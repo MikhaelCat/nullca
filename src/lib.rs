@@ -28,4 +28,4 @@ pub use proto::protobuf::ProtobufMessage;
 pub use proto::reassembler::StreamReassembler;
 pub use proto::secrets::{scan_secrets, DetectedSecret, SecretDetector, SecretKind};
 pub use proto::websocket::{WebSocketAssembler, WebSocketFrame, WebSocketOpcode, WebSocketParser};
-pub use proto::x509::{X509CertificateInfo, X509Parser};
+pub use proto::x509::{CertScanSummary, X509CertificateInfo, X509Parser};

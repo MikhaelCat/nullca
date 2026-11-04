@@ -98,7 +98,7 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
 - Measures and prints DNS connect latency, Time-To-First-Byte (TTFB), total roundtrip duration, response headers, and syntax-highlighted response bodies.
 - Triggered instantly inside the Cockpit by pressing `[r]` on any selected request packet.
 
-### 📜 Universal TLS Certificate Support & X.509 Inspector
+### 📜 Universal TLS Certificate Support & Deep X.509 Dissector
 - **Zero-CA Architecture = 100% Real-World Certificate Compatibility:**
   - Conventional proxies (Burp Suite, mitmproxy, Charles) must generate forge certificates signed by a local Root CA. If the application uses Certificate Pinning or strict trust stores, the TLS handshake is rejected.
   - `nullca` does **not** terminate or forge TLS sessions. It hooks userspace crypto boundaries (`SSL_read`, `SSL_write`, `crypto/tls.(*Conn).Read/Write`) **inside process memory**.
@@ -107,12 +107,33 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
     - Private & Enterprise PKI: HashiCorp Vault, Active Directory Certificate Services (AD CS), AWS Private CA.
     - Self-signed & dev certificates: `localhost.pem`, Kubernetes internal TLS, mTLS mutual-auth certs.
     - Pinned certificates: Mobile apps, hardened Go binaries, and embedded TLS trust anchors.
-- **Pure-Rust X.509 ASN.1 DER/PEM Dissector (`nullca inspect-cert`):**
-  - Extract cryptographic metadata directly from `.pem` or `.der` files:
-    ```bash
-    nullca inspect-cert /etc/ssl/certs/ISRG_Root_X1.pem
-    ```
-  - Dissects Subject, Issuer, Validity window, Public Key Algorithm (RSA 2048/4096, ECDSA P-256/P-384, Ed25519), Signature Algorithm, Serial Number, and calculates the SHA-256 fingerprint.
+- **Deep Pure-Rust X.509 ASN.1 Engine (`nullca inspect-cert`):**
+  - **Full Cryptographic Suite Support:**
+    - Standard & Heavy RSA: 1024, 2048, 3072, 4096, 8192-bit and RSASSA-PSS.
+    - Elliptic Curves: NIST curves (secp256r1/P-256, secp384r1/P-384, secp521r1/P-521), Koblitz secp256k1 (Bitcoin/Ethereum), and European Brainpool curves (brainpoolP256r1, brainpoolP384r1, brainpoolP512r1).
+    - Edwards & Montgomery: Ed25519, Ed448 (Goldilocks curve), X25519, X448.
+    - National Standards: Russian GOST R 34.10-2001/2012 (256/512-bit TC-26) and Chinese SM2/SM3/SM9 commercial crypto.
+    - Post-Quantum Cryptography (NIST FIPS 203/204/205 & Hybrid): ML-DSA (Dilithium-2/3/5), Falcon-512/1024, Kyber/ML-KEM-512/768/1024, SLH-DSA (SPHINCS+).
+    - Legacy Suites: Digital Signature Algorithm (DSA), Diffie-Hellman, SHA-1, MD5, and MD2 legacy suites.
+  - **RFC 5280 Extensions Dissection:**
+    - Basic Constraints (`is_ca`, `path_length_constraint`).
+    - Key Usage bitflags (Digital Signature, Key Encipherment, Cert Sign, CRL Sign, etc.).
+    - Extended Key Usage (TLS Server Auth, Client Auth, Code Signing, Time Stamping, OCSP Signing, Smartcard Logon).
+    - Subject Alternative Names (SANs) with full DNS Names, IPv4/IPv6 Addresses, Emails, URIs.
+    - Authority Information Access (AIA) OCSP Responders and CA Issuer URLs.
+    - CRL Distribution Points (revocation endpoint URLs), Subject Key ID (SKI) & Authority Key ID (AKI).
+  - **Multi-Certificate Bundles & Directory Inventory:**
+    - Inspect single certs, full chains, bundles (`ca-certificates.crt`), or entire directories (`/etc/ssl/certs`):
+      ```bash
+      # Dissect single certificate with exact cryptographic fingerprints:
+      nullca inspect-cert /etc/ca-certificates/extracted/cadir/ISRG_Root_X1.pem
+
+      # Dissect full certificate bundle (e.g. 119 certificates in one file):
+      nullca inspect-cert /etc/ssl/certs/ca-certificates.crt
+
+      # Scan entire directory and generate cryptographic inventory summary:
+      nullca inspect-cert /etc/ca-certificates/extracted/cadir
+      ```
 
 ### 🗄️ Non-HTTP Encrypted Protocols (Redis, SQL Database & SMTP)
 - Encrypted traffic is not limited to HTTP. `nullca` automatically detects and dissects non-HTTP protocols flowing over TLS:
