@@ -251,7 +251,7 @@ fn test_parse_x509_crl() {
     assert_eq!(crl.issuer_cn.as_deref(), Some("Test CRL Issuer"));
     assert_eq!(crl.signature_algorithm, "SHA256-with-RSA");
     assert_eq!(crl.revoked_count, 1);
-    assert_eq!(crl.revoked_certificates[0].serial_number_hex, "12:34");
+    assert_eq!(crl.revoked_certificates[0].serial_hex, "12:34");
 }
 
 #[test]
