@@ -197,6 +197,77 @@ impl GoSymbolTable {
     }
 }
 
+/// Dynamically discovered runtime offsets inside Go's `crypto/tls.Conn` and goroutines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoRuntimeOffsets {
+    /// Offset of underlying net.Conn in crypto/tls.Conn struct
+    pub conn_offset: u32,
+    /// Offset of raw file descriptor fd in net.TCPConn struct
+    pub fd_offset: u32,
+    /// Offset of TLS buffer or active segment
+    pub buf_offset: u32,
+    /// Thread Local Storage offset for current goroutine (runtime.g)
+    pub g_tls_offset: i32,
+}
+
+impl Default for GoRuntimeOffsets {
+    fn default() -> Self {
+        Self {
+            conn_offset: 0x0,
+            fd_offset: 0x10,
+            buf_offset: 0x20,
+            g_tls_offset: -8,
+        }
+    }
+}
+
+/// Heuristically disassembles the function prologue of a Go method to infer struct field offsets without DWARF.
+pub fn heuristic_disasm_go_prologue(code: &[u8]) -> GoRuntimeOffsets {
+    let mut offsets = GoRuntimeOffsets::default();
+    let mut i = 0;
+    let limit = code.len().min(64);
+
+    while i < limit {
+        // Match FS-relative load for runtime.g (e.g., MOV RAX, FS:[0xfffffff8] or FS:[offset])
+        // 64 48 8b 04 25 <4-byte offset>
+        if i + 9 <= limit && code[i] == 0x64 && code[i + 1] == 0x48 && code[i + 2] == 0x8b && code[i + 3] == 0x04 && code[i + 4] == 0x25 {
+            let offset_bytes: [u8; 4] = code[i + 5..i + 9].try_into().unwrap();
+            offsets.g_tls_offset = i32::from_le_bytes(offset_bytes);
+            i += 9;
+            continue;
+        }
+
+        // Match REX.W MOV reg, [reg + disp8] (48 8b / 48 89 / 48 8d)
+        if i + 3 <= limit && code[i] == 0x48 && (code[i + 1] == 0x8b || code[i + 1] == 0x89) {
+            let modrm = code[i + 2];
+            let mod_bits = (modrm >> 6) & 0x03;
+            if mod_bits == 1 && i + 4 <= limit {
+                // 8-bit displacement
+                let disp = code[i + 3] as u32;
+                if disp > 0 && offsets.conn_offset == 0 {
+                    offsets.conn_offset = disp;
+                } else if disp > 0 && offsets.buf_offset == 0x20 {
+                    offsets.buf_offset = disp;
+                }
+                i += 4;
+                continue;
+            } else if mod_bits == 2 && i + 7 <= limit {
+                // 32-bit displacement
+                let disp = u32::from_le_bytes(code[i + 3..i + 7].try_into().unwrap());
+                if disp > 0 && offsets.conn_offset == 0 {
+                    offsets.conn_offset = disp;
+                }
+                i += 7;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    offsets
+}
+
 /// Locates Go `.gopclntab` magic bytes in an ELF slice.
 fn find_pclntab_magic(data: &[u8]) -> Option<usize> {
     if data.len() < 16 {
@@ -249,5 +320,23 @@ mod tests {
 
         let found = find_pclntab_magic(&mock_elf);
         assert_eq!(found, Some(100));
+    }
+
+    #[test]
+    fn test_heuristic_disasm_go_prologue() {
+        // Machine code:
+        // 64 48 8b 04 25 f8 ff ff ff  -> MOV RAX, FS:[0xfffffff8] (runtime.g)
+        // 48 8b 58 18                 -> MOV RBX, [RAX + 0x18]
+        // 48 8b 4b 30                 -> MOV RCX, [RBX + 0x30]
+        let code = [
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff,
+            0x48, 0x8b, 0x58, 0x18,
+            0x48, 0x8b, 0x4b, 0x30,
+        ];
+
+        let offsets = heuristic_disasm_go_prologue(&code);
+        assert_eq!(offsets.g_tls_offset, -8);
+        assert_eq!(offsets.conn_offset, 0x18);
+        assert_eq!(offsets.buf_offset, 0x30);
     }
 }

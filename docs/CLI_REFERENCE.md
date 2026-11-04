@@ -115,6 +115,27 @@ nullca diff req1.txt req2.txt
 
 ---
 
+## Interactive Cockpit TUI: Vim Command Mode (`:`) & Live Search (`/`)
+
+When running `nullca trace --ui` or `nullca run --ui`, the interactive cockpit supports Vim-style controls:
+
+| Key / Command | Action |
+|---|---|
+| `:` | Open Vim Command Line |
+| `:w <path>` or `:save <path>` | Save in-memory packet buffer to a HAR 1.2 file |
+| `:clear` or `:c` | Clear all captured packets from memory |
+| `:filter <dsl>` | Apply Filter DSL expression on the fly |
+| `:export <har\|pcap\|openapi> [path]` | Export capture to specified format |
+| `:q` or `:quit` | Exit the cockpit |
+| `/` | Start live regex / substring search across packet payloads |
+| `F` | Open interactive Filter DSL editor |
+| `R` or `t` | Open interactive Request Repeater & Tamper Cockpit |
+| `f` or `m` | Maximize current focused pane to Fullscreen |
+| `s` | Open Quick Export modal dialog |
+| `?` or `h` | Toggle Full Help & Keyboard Reference modal |
+
+---
+
 ## Filter DSL Syntax
 
 NullCA includes an AST-compiled expression language for filtering packets in real-time:

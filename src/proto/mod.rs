@@ -5,6 +5,7 @@ pub mod http2;
 pub mod huffman;
 pub mod multiplexer;
 pub mod protobuf;
+pub mod qpack;
 pub mod reassembler;
 pub mod secrets;
 pub mod websocket;

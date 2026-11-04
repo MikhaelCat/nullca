@@ -29,7 +29,14 @@ NullCA includes built-in, zero-dependency dissectors for modern web and applicat
 
 ---
 
-## 3. gRPC & Protocol Buffers Dissector (`src/proto/grpc.rs`, `src/proto/protobuf.rs`)
+## 3. HTTP/3 & QPACK Decompressor (`src/proto/qpack.rs`)
+- **RFC 9204 Static Table**: Full 99-entry static lookup table for common HTTP/3 headers (`:method`, `:path`, `:status`, `strict-transport-security`, etc.).
+- **Indexed & Literal Header Field Decoding**: Decodes indexed representations (`1xxxxxxx`), literal fields with static/dynamic name reference, and literal fields with literal names.
+- **Canonical Huffman Integration**: Seamlessly decodes 8-bit clean Huffman strings using RFC 7541/9204 code trees.
+
+---
+
+## 4. gRPC & Protocol Buffers Dissector (`src/proto/grpc.rs`, `src/proto/protobuf.rs`)
 - **gRPC Framing**: Strips 5-byte gRPC frame headers (`Compressed-Flag` + 4-byte `Message-Length`).
 - **Protobuf Wire Types**:
   - `0`: Varint (`int32`, `int64`, `uint32`, `bool`, `enum`)

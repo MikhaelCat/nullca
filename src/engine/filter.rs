@@ -374,10 +374,8 @@ impl FilterEngine {
             }
             "status" | "code" => {
                 if let Value::Number(n) = val {
-                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
-                        if let crate::proto::http1::Http1Message::Response { status_code, .. } = msg {
-                            return compare_num(status_code as i64, op, *n);
-                        }
+                    if let Some(crate::proto::http1::Http1Message::Response { status_code, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        return compare_num(status_code as i64, op, *n);
                     }
                     false
                 } else {
@@ -386,10 +384,8 @@ impl FilterEngine {
             }
             "method" => {
                 if let Value::String(s) = val {
-                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
-                        if let crate::proto::http1::Http1Message::Request { method, .. } = msg {
-                            return compare_str(&method, op, s);
-                        }
+                    if let Some(crate::proto::http1::Http1Message::Request { method, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        return compare_str(&method, op, s);
                     }
                     false
                 } else {
@@ -398,10 +394,8 @@ impl FilterEngine {
             }
             "path" | "uri" => {
                 if let Value::String(s) = val {
-                    if let Some(msg) = crate::proto::http1::Http1Parser::parse(&event.data) {
-                        if let crate::proto::http1::Http1Message::Request { uri, .. } = msg {
-                            return compare_str(&uri, op, s);
-                        }
+                    if let Some(crate::proto::http1::Http1Message::Request { uri, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                        return compare_str(&uri, op, s);
                     }
                     false
                 } else {

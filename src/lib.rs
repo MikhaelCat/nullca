@@ -25,6 +25,7 @@ pub use proto::http2::{HpackDecoder, Http2Parser};
 pub use proto::huffman::HuffmanTree;
 pub use proto::multiplexer::Http2Session;
 pub use proto::protobuf::ProtobufMessage;
+pub use proto::qpack::QpackDecoder;
 pub use proto::reassembler::StreamReassembler;
 pub use proto::secrets::{scan_secrets, DetectedSecret, SecretDetector, SecretKind};
 pub use proto::websocket::{WebSocketAssembler, WebSocketFrame, WebSocketOpcode, WebSocketParser};

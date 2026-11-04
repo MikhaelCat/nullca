@@ -93,6 +93,12 @@ pub struct DashboardState {
     pub show_export: bool,
     pub export_choice: usize,
     pub show_help: bool,
+
+    // Vim-style Command (:) & Search (/) Modes
+    pub command_mode: bool,
+    pub command_input: String,
+    pub search_mode: bool,
+    pub search_input: String,
 }
 
 impl Default for DashboardState {
@@ -131,6 +137,10 @@ impl DashboardState {
             show_export: false,
             export_choice: 0,
             show_help: false,
+            command_mode: false,
+            command_input: String::new(),
+            search_mode: false,
+            search_input: String::new(),
         }
     }
 
@@ -438,7 +448,59 @@ async fn dashboard_loop(
                         continue;
                     }
 
-                    // 4. FILTER DSL INPUT MODE
+                    // 4. VIM COMMAND MODE (:)
+                    if state.command_mode {
+                        match key.code {
+                            KeyCode::Enter => {
+                                state.command_mode = false;
+                                let cmd = state.command_input.trim().to_string();
+                                state.command_input.clear();
+                                if !cmd.is_empty() && execute_vim_command(state, &cmd) {
+                                    return Ok(()); // :q or :quit requested
+                                }
+                            }
+                            KeyCode::Esc => {
+                                state.command_mode = false;
+                                state.command_input.clear();
+                            }
+                            KeyCode::Backspace => {
+                                state.command_input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                state.command_input.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 5. IN-MEMORY SEARCH MODE (/)
+                    if state.search_mode {
+                        match key.code {
+                            KeyCode::Enter => {
+                                state.search_mode = false;
+                                let q = state.search_input.trim().to_string();
+                                state.search_input.clear();
+                                if !q.is_empty() {
+                                    execute_search_query(state, &q);
+                                }
+                            }
+                            KeyCode::Esc => {
+                                state.search_mode = false;
+                                state.search_input.clear();
+                            }
+                            KeyCode::Backspace => {
+                                state.search_input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                state.search_input.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
+                    // 6. FILTER DSL INPUT MODE
                     if state.is_filtering {
                         match key.code {
                             KeyCode::Enter => {
@@ -498,14 +560,22 @@ async fn dashboard_loop(
                         continue;
                     }
 
-                    // 5. STANDARD DASHBOARD HOTKEYS
+                    // 7. STANDARD DASHBOARD HOTKEYS
                     match key.code {
                         KeyCode::Char('q') => break,
-                        KeyCode::Char('p') | KeyCode::Char(' ') => {
-                            state.paused = !state.paused;
+                        KeyCode::Char(':') => {
+                            state.command_mode = true;
+                            state.command_input.clear();
                         }
                         KeyCode::Char('/') => {
+                            state.search_mode = true;
+                            state.search_input.clear();
+                        }
+                        KeyCode::Char('F') => {
                             state.is_filtering = true;
+                        }
+                        KeyCode::Char('p') | KeyCode::Char(' ') => {
+                            state.paused = !state.paused;
                         }
                         KeyCode::Char('?') | KeyCode::Char('h') => {
                             state.show_help = true;
@@ -836,6 +906,126 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
             }
         }
         _ => {}
+    }
+}
+
+/// Executes a Vim-style `:` command line. Returns true if exit was requested.
+fn execute_vim_command(state: &mut DashboardState, cmd: &str) -> bool {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    if parts.is_empty() {
+        return false;
+    }
+
+    match parts[0] {
+        "q" | "quit" | "exit" => {
+            return true;
+        }
+        "clear" | "c" => {
+            state.events.clear();
+            state.filtered_indices.clear();
+            state.table_state.select(Some(0));
+            state.set_status("Cleared all captured packets from memory".into());
+        }
+        "w" | "save" => {
+            let path = parts.get(1).copied().unwrap_or("nullca_dump.har");
+            if HarExporter::write_to_file(&state.events, path).is_ok() {
+                state.set_status(format!("Saved capture to '{}'", path));
+            } else {
+                state.set_status(format!("Failed to write to '{}'", path));
+            }
+        }
+        "export" => {
+            if let Some(&fmt) = parts.get(1) {
+                let default_name = match fmt {
+                    "har" => "nullca_export.har",
+                    "pcap" => "nullca_export.pcapng",
+                    "openapi" => "nullca_export.json",
+                    _ => "nullca_export.bin",
+                };
+                let path = parts.get(2).copied().unwrap_or(default_name);
+                match fmt {
+                    "har" => {
+                        if HarExporter::write_to_file(&state.events, path).is_ok() {
+                            state.set_status(format!("Exported HAR to '{}'", path));
+                        }
+                    }
+                    "pcap" => {
+                        if PcapNgWriter::write_to_file(&state.events, path).is_ok() {
+                            state.set_status(format!("Exported PCAP-NG to '{}'", path));
+                        }
+                    }
+                    "openapi" => {
+                        let har = HarExporter::export_events(&state.events);
+                        let gen = crate::export::openapi::OpenApiGenerator::new();
+                        let spec = gen.generate_from_har_entries(&har.log.entries, "NullCA Export", "1.0.0");
+                        if let Ok(j) = gen.to_json_string(&spec) {
+                            let _ = std::fs::write(path, j);
+                            state.set_status(format!("Exported OpenAPI 3.0 to '{}'", path));
+                        }
+                    }
+                    _ => {
+                        state.set_status("Unknown format. Use 'har', 'pcap', or 'openapi'".into());
+                    }
+                }
+            } else {
+                state.set_status("Usage: :export <har|pcap|openapi> [path]".into());
+            }
+        }
+        "filter" | "f" => {
+            if parts.len() > 1 {
+                let dsl = parts[1..].join(" ");
+                state.filter_input = dsl;
+                state.apply_filter();
+                state.set_status(format!("Applied Filter DSL: {}", state.filter_input));
+            } else {
+                state.filter_input.clear();
+                state.apply_filter();
+                state.set_status("Filter cleared".into());
+            }
+        }
+        "help" | "h" => {
+            state.show_help = true;
+        }
+        _ => {
+            state.set_status(format!("Unknown command ':{}'. Type ':help' for commands", parts[0]));
+        }
+    }
+
+    false
+}
+
+/// Searches all captured packets in memory and jumps to the first match.
+fn execute_search_query(state: &mut DashboardState, query: &str) {
+    let q_lower = query.to_ascii_lowercase();
+    let current_selected = state.selected_event_idx().unwrap_or(0);
+
+    // Search from next item downwards, wrapping around
+    let n = state.filtered_indices.len();
+    if n == 0 {
+        state.set_status("No packets to search".into());
+        return;
+    }
+
+    let mut found_row = None;
+    for offset in 1..=n {
+        let candidate_row = (current_selected + offset) % n;
+        let event_idx = state.filtered_indices[candidate_row];
+        if let Some(ev) = state.events.get(event_idx) {
+            let data_str = String::from_utf8_lossy(&ev.data).to_ascii_lowercase();
+            if data_str.contains(&q_lower) || ev.comm.to_ascii_lowercase().contains(&q_lower) {
+                found_row = Some(candidate_row);
+                break;
+            }
+        }
+    }
+
+    if let Some(row) = found_row {
+        state.table_state.select(Some(row));
+        state.details_scroll = 0;
+        state.hex_scroll = 0;
+        state.set_status(format!("Found match for '{}' at packet #{}", query, row + 1));
+    } else {
+        state.set_status(format!("No matches found for '{}'", query));
     }
 }
 
@@ -1524,6 +1714,26 @@ fn draw_hexdump_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 }
 
 fn draw_footer(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
+    if state.command_mode {
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(":", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(&state.command_input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+        ]));
+        f.render_widget(p, area);
+        return;
+    }
+
+    if state.search_mode {
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled("/", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(&state.search_input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]));
+        f.render_widget(p, area);
+        return;
+    }
+
     if let Some((ref msg, time)) = state.status_message {
         if time.elapsed() < Duration::from_secs(4) {
             let p = Paragraph::new(Line::from(vec![
