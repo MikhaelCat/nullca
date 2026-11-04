@@ -1,9 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use nullca::engine::event::{Direction, TlsEvent};
 use nullca::engine::filter::FilterEngine;
-use nullca::proto::huffman::{decode_huffman, encode_huffman};
 use nullca::proto::http1::Http1Parser;
 use nullca::proto::http2::{HpackDecoder, Http2Parser};
+use nullca::proto::huffman::{decode_huffman, encode_huffman};
 use nullca::proto::protobuf::{encode_varint, ProtobufMessage};
 
 fn bench_http1_parsing(c: &mut Criterion) {
@@ -32,10 +32,11 @@ fn bench_hpack_decoding(c: &mut Criterion) {
 fn bench_http2_frame_parse(c: &mut Criterion) {
     let raw_frame = [
         0x00, 0x00, 0x14, // 20 bytes length
-        0x01,             // Type: HEADERS
-        0x05,             // Flags: END_STREAM | END_HEADERS
+        0x01, // Type: HEADERS
+        0x05, // Flags: END_STREAM | END_HEADERS
         0x00, 0x00, 0x00, 0x01, // Stream 1
-        0x82, 0x84, 0x87, 0x88, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e,
+        0x82, 0x84, 0x87, 0x88, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+        0x9a, 0x9b, 0x9c, 0x9d, 0x9e,
     ];
 
     c.bench_function("http2_frame_parse", |b| {
@@ -75,7 +76,9 @@ fn bench_protobuf_decoding(c: &mut Criterion) {
 }
 
 fn bench_filter_dsl_matching(c: &mut Criterion) {
-    let engine = FilterEngine::compile("pid == 1420 && (proto == 'http2' || body contains 'users')").unwrap();
+    let engine =
+        FilterEngine::compile("pid == 1420 && (proto == 'http2' || body contains 'users')")
+            .unwrap();
     let event = TlsEvent::new(
         1000,
         1420,

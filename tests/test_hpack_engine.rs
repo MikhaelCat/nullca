@@ -30,7 +30,9 @@ fn test_rfc7541_literal_header_incremental_indexing() {
     raw.push(0x0d);
     raw.extend_from_slice(b"custom-header");
 
-    let headers = decoder.decode(&raw).expect("Failed to decode custom literal");
+    let headers = decoder
+        .decode(&raw)
+        .expect("Failed to decode custom literal");
     assert_eq!(headers.len(), 1);
     assert_eq!(headers[0].name, "custom-key");
     assert_eq!(headers[0].value, "custom-header");
@@ -38,7 +40,9 @@ fn test_rfc7541_literal_header_incremental_indexing() {
     // The entry is now in dynamic table at index 62!
     // 0xbe = 0x80 | 62 = 10111110 = 0xbe
     let raw_indexed = [0xbe];
-    let headers2 = decoder.decode(&raw_indexed).expect("Failed to look up dynamic table entry");
+    let headers2 = decoder
+        .decode(&raw_indexed)
+        .expect("Failed to look up dynamic table entry");
     assert_eq!(headers2.len(), 1);
     assert_eq!(headers2[0].name, "custom-key");
     assert_eq!(headers2[0].value, "custom-header");

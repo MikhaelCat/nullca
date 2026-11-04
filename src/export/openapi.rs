@@ -126,7 +126,10 @@ impl Default for OpenApiGenerator {
 impl OpenApiGenerator {
     pub fn new() -> Self {
         Self {
-            uuid_regex: Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$").unwrap(),
+            uuid_regex: Regex::new(
+                r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            )
+            .unwrap(),
             numeric_id_regex: Regex::new(r"^\d+$").unwrap(),
             hex_id_regex: Regex::new(r"^[0-9a-fA-F]{16,64}$").unwrap(),
         }
@@ -167,7 +170,11 @@ impl OpenApiGenerator {
         }
 
         let parameterized = new_segments.join("/");
-        let final_path = if parameterized.is_empty() { "/".to_string() } else { parameterized };
+        let final_path = if parameterized.is_empty() {
+            "/".to_string()
+        } else {
+            parameterized
+        };
         (final_path, param_names)
     }
 
@@ -257,7 +264,12 @@ impl OpenApiGenerator {
     }
 
     /// Generates an OpenAPI 3.0 specification from a list of HAR entries.
-    pub fn generate_from_har_entries(&self, entries: &[HarEntry], title: &str, version: &str) -> OpenApiSpec {
+    pub fn generate_from_har_entries(
+        &self,
+        entries: &[HarEntry],
+        title: &str,
+        version: &str,
+    ) -> OpenApiSpec {
         let mut paths: BTreeMap<String, PathItem> = BTreeMap::new();
 
         for entry in entries {
@@ -386,7 +398,9 @@ impl OpenApiGenerator {
             info: OpenApiInfo {
                 title: title.to_string(),
                 version: version.to_string(),
-                description: "OpenAPI 3.0.3 specification auto-synthesized by NullCA Zero-CA Engine".to_string(),
+                description:
+                    "OpenAPI 3.0.3 specification auto-synthesized by NullCA Zero-CA Engine"
+                        .to_string(),
             },
             paths,
             components: Some(Components::default()),
@@ -400,14 +414,17 @@ impl OpenApiGenerator {
 
     /// Serializes an OpenAPI spec into pretty-printed JSON.
     pub fn to_json_string(&self, spec: &OpenApiSpec) -> anyhow::Result<String> {
-        serde_json::to_string_pretty(spec).map_err(|e| anyhow::anyhow!("Failed to serialize OpenAPI spec: {}", e))
+        serde_json::to_string_pretty(spec)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize OpenAPI spec: {}", e))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::export::har::{HarContent, HarHeader, HarQueryParam, HarRequest, HarResponse, HarTimings};
+    use crate::export::har::{
+        HarContent, HarHeader, HarQueryParam, HarRequest, HarResponse, HarTimings,
+    };
     use serde_json::json;
 
     #[test]
@@ -417,7 +434,8 @@ mod tests {
         assert_eq!(path, "/api/v1/users/{user_id}/orders");
         assert_eq!(params, vec!["user_id"]);
 
-        let (uuid_path, uuid_params) = generator.parameterize_path("/api/v2/items/550e8400-e29b-41d4-a716-446655440000");
+        let (uuid_path, uuid_params) =
+            generator.parameterize_path("/api/v2/items/550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(uuid_path, "/api/v2/items/{item_id}");
         assert_eq!(uuid_params, vec!["item_id"]);
     }
@@ -438,9 +456,20 @@ mod tests {
         let schema = generator.infer_schema_from_json(&val);
         assert_eq!(schema.schema_type.as_deref(), Some("object"));
         assert!(schema.properties.contains_key("id"));
-        assert_eq!(schema.properties.get("id").unwrap().schema_type.as_deref(), Some("integer"));
+        assert_eq!(
+            schema.properties.get("id").unwrap().schema_type.as_deref(),
+            Some("integer")
+        );
         assert!(schema.properties.contains_key("roles"));
-        assert_eq!(schema.properties.get("roles").unwrap().schema_type.as_deref(), Some("array"));
+        assert_eq!(
+            schema
+                .properties
+                .get("roles")
+                .unwrap()
+                .schema_type
+                .as_deref(),
+            Some("array")
+        );
     }
 
     #[test]

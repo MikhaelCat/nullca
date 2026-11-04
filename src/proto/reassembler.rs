@@ -1,5 +1,6 @@
 use crate::engine::event::Direction;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ConnectionKey {
@@ -8,34 +9,107 @@ pub struct ConnectionKey {
     pub direction: Direction,
 }
 
-#[derive(Default)]
+#[derive(Debug, Clone)]
+pub struct BufferEntry {
+    pub data: Vec<u8>,
+    pub last_seen: Instant,
+}
+
 pub struct StreamReassembler {
-    buffers: HashMap<ConnectionKey, Vec<u8>>,
+    buffers: HashMap<ConnectionKey, BufferEntry>,
     max_buffer_size: usize,
+    max_connections: usize,
+    default_ttl: Duration,
+}
+
+impl Default for StreamReassembler {
+    fn default() -> Self {
+        Self::new(65536)
+    }
 }
 
 impl StreamReassembler {
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
+    pub const DEFAULT_TTL: Duration = Duration::from_secs(60);
+
     pub fn new(max_buffer_size: usize) -> Self {
+        Self::with_limits(
+            max_buffer_size,
+            Self::DEFAULT_MAX_CONNECTIONS,
+            Self::DEFAULT_TTL,
+        )
+    }
+
+    pub fn with_limits(
+        max_buffer_size: usize,
+        max_connections: usize,
+        default_ttl: Duration,
+    ) -> Self {
         Self {
             buffers: HashMap::new(),
             max_buffer_size,
+            max_connections,
+            default_ttl,
         }
     }
 
+    pub fn active_connection_count(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// Prunes connections that have not received data within `ttl`.
+    pub fn prune_stale(&mut self, ttl: Duration) -> usize {
+        let now = Instant::now();
+        let initial_len = self.buffers.len();
+        self.buffers.retain(|_, entry| {
+            now.checked_duration_since(entry.last_seen)
+                .unwrap_or_default()
+                < ttl
+        });
+        initial_len - self.buffers.len()
+    }
+
     pub fn push_chunk(&mut self, key: ConnectionKey, chunk: &[u8]) -> Option<Vec<u8>> {
-        let buf = self.buffers.entry(key).or_default();
-        buf.extend_from_slice(chunk);
+        // Enforce max connections limit by evicting stale or oldest entry if capacity reached
+        if !self.buffers.contains_key(&key)
+            && self.buffers.len() >= self.max_connections
+            && self.prune_stale(self.default_ttl) == 0
+        {
+            if let Some((oldest_key, _)) = self
+                .buffers
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(k, e)| (k.clone(), e.last_seen))
+            {
+                self.buffers.remove(&oldest_key);
+            }
+        }
+
+        let now = Instant::now();
+        let entry = self
+            .buffers
+            .entry(key.clone())
+            .or_insert_with(|| BufferEntry {
+                data: Vec::new(),
+                last_seen: now,
+            });
+        entry.last_seen = now;
+        entry.data.extend_from_slice(chunk);
 
         // Check for complete HTTP/1.1 message boundary
-        if let Some(msg_len) = Self::detect_http1_complete(buf) {
-            let complete_msg = buf[..msg_len].to_vec();
-            buf.drain(..msg_len);
+        if let Some(msg_len) = Self::detect_http1_complete(&entry.data) {
+            let complete_msg = entry.data[..msg_len].to_vec();
+            entry.data.drain(..msg_len);
+            if entry.data.is_empty() {
+                self.buffers.remove(&key);
+            }
             return Some(complete_msg);
         }
 
         // Buffer limit protection against memory exhaustion
-        if buf.len() > self.max_buffer_size {
-            let drained = std::mem::take(buf);
+        if entry.data.len() > self.max_buffer_size {
+            let drained = std::mem::take(&mut entry.data);
+            self.buffers.remove(&key);
             return Some(drained);
         }
 
@@ -105,6 +179,8 @@ mod tests {
         let chunk2 = b"llo";
 
         assert!(reassembler.push_chunk(key.clone(), chunk1).is_none());
+        assert_eq!(reassembler.active_connection_count(), 1);
+
         let complete = reassembler
             .push_chunk(key, chunk2)
             .expect("Should reassemble full message");
@@ -113,5 +189,69 @@ mod tests {
             String::from_utf8_lossy(&complete),
             "POST /submit HTTP/1.1\r\nHost: test.com\r\nContent-Length: 5\r\n\r\nhello"
         );
+        // After draining completely, connection entry is pruned automatically
+        assert_eq!(reassembler.active_connection_count(), 0);
+    }
+
+    #[test]
+    fn test_reassembler_prune_stale_and_lru() {
+        let mut reassembler = StreamReassembler::with_limits(1024, 2, Duration::from_millis(50));
+        let k1 = ConnectionKey {
+            pid: 1,
+            fd: 1,
+            direction: Direction::Ingress,
+        };
+        let k2 = ConnectionKey {
+            pid: 2,
+            fd: 2,
+            direction: Direction::Ingress,
+        };
+        let k3 = ConnectionKey {
+            pid: 3,
+            fd: 3,
+            direction: Direction::Ingress,
+        };
+
+        // Push partial chunk to k1 and k2
+        reassembler.push_chunk(k1, b"PARTIAL1");
+        reassembler.push_chunk(k2.clone(), b"PARTIAL2");
+        assert_eq!(reassembler.active_connection_count(), 2);
+
+        // Sleep to let k1 & k2 become stale
+        std::thread::sleep(Duration::from_millis(60));
+
+        // Pushing k3 when capacity is full will trigger prune_stale
+        reassembler.push_chunk(k3, b"PARTIAL3");
+        // Stale entries were pruned
+        assert!(reassembler.active_connection_count() <= 2);
+    }
+
+    #[test]
+    fn test_reassembler_max_connections_eviction() {
+        let mut reassembler = StreamReassembler::with_limits(1024, 2, Duration::from_secs(3600));
+        let k1 = ConnectionKey {
+            pid: 10,
+            fd: 1,
+            direction: Direction::Ingress,
+        };
+        let k2 = ConnectionKey {
+            pid: 20,
+            fd: 2,
+            direction: Direction::Ingress,
+        };
+        let k3 = ConnectionKey {
+            pid: 30,
+            fd: 3,
+            direction: Direction::Ingress,
+        };
+
+        reassembler.push_chunk(k1, b"REQ1");
+        std::thread::sleep(Duration::from_millis(5));
+        reassembler.push_chunk(k2, b"REQ2");
+        assert_eq!(reassembler.active_connection_count(), 2);
+
+        // Max connections is 2, pushing k3 must evict oldest (k1)
+        reassembler.push_chunk(k3, b"REQ3");
+        assert_eq!(reassembler.active_connection_count(), 2);
     }
 }

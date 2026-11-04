@@ -2,6 +2,8 @@ use crate::engine::discover::TargetProcess;
 use crate::engine::event::{Direction, TlsEvent};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -21,6 +23,7 @@ pub enum BpfError {
 pub struct BpfLoader {
     target_pid: Option<u32>,
     bpf_obj_path: Option<String>,
+    pub dropped_events: Arc<AtomicU64>,
 }
 
 impl BpfLoader {
@@ -28,11 +31,23 @@ impl BpfLoader {
         Self {
             target_pid,
             bpf_obj_path: None,
+            dropped_events: Arc::new(AtomicU64::new(0)),
         }
     }
 
+    pub fn drop_counter(&self) -> Arc<AtomicU64> {
+        self.dropped_events.clone()
+    }
+
+    pub fn record_drop(&self) {
+        self.dropped_events.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Compile BPF C program to ELF bytecode using clang
-    pub fn compile_bpf_program<P: AsRef<Path>>(source_path: P, output_path: P) -> Result<(), BpfError> {
+    pub fn compile_bpf_program<P: AsRef<Path>>(
+        source_path: P,
+        output_path: P,
+    ) -> Result<(), BpfError> {
         let output = Command::new("clang")
             .arg("-target")
             .arg("bpf")
@@ -78,7 +93,9 @@ impl BpfLoader {
         // echo 'p:uprobes/ssl_read <libssl_path>:SSL_read' >> /sys/kernel/tracing/uprobe_events
         let tracefs = Path::new("/sys/kernel/tracing/uprobe_events");
         if !tracefs.exists() {
-            return Err(BpfError::TracefsError("tracefs uprobe_events not mounted".into()));
+            return Err(BpfError::TracefsError(
+                "tracefs uprobe_events not mounted".into(),
+            ));
         }
 
         Ok(())
@@ -90,7 +107,9 @@ impl BpfLoader {
         tx: mpsc::Sender<TlsEvent>,
     ) -> Result<(), BpfError> {
         let pid = target.map(|t| t.pid).unwrap_or(std::process::id());
-        let comm = target.map(|t| t.name.clone()).unwrap_or_else(|| "curl".into());
+        let comm = target
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "curl".into());
         let fd = 3;
 
         // Sample synthetic TLS sessions:
@@ -133,12 +152,13 @@ impl BpfLoader {
             Direction::Egress,
             comm.clone(),
             vec![
-                b'P', b'R', b'I', b' ', b'*', b' ', b'H', b'T', b'T', b'P', b'/', b'2', b'.', b'0', b'\r', b'\n', b'\r', b'\n', b'S', b'M', b'\r', b'\n', b'\r', b'\n',
-                0x00, 0x00, 0x01, // Length: 1
-                0x01,             // Type: HEADERS
-                0x05,             // Flags: END_STREAM | END_HEADERS
+                b'P', b'R', b'I', b' ', b'*', b' ', b'H', b'T', b'T', b'P', b'/', b'2', b'.', b'0',
+                b'\r', b'\n', b'\r', b'\n', b'S', b'M', b'\r', b'\n', b'\r', b'\n', 0x00, 0x00,
+                0x01, // Length: 1
+                0x01, // Type: HEADERS
+                0x05, // Flags: END_STREAM | END_HEADERS
                 0x00, 0x00, 0x00, 0x01, // Stream: 1
-                0x82,             // HPACK :method: GET
+                0x82, // HPACK :method: GET
             ],
             Some(36),
         );
@@ -148,7 +168,7 @@ impl BpfLoader {
 
         // 4. gRPC Message Frame
         let grpc_data = vec![
-            0x00,                   // uncompressed
+            0x00, // uncompressed
             0x00, 0x00, 0x00, 0x08, // length = 8
             0x08, 0x01, 0x12, 0x04, b't', b'e', b's', b't',
         ];

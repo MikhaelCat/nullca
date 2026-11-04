@@ -81,7 +81,8 @@ impl FuzzEngine {
             let new_path = if mutated_req.path.contains(&format!("{}=", param_name)) {
                 let re_pattern = format!(r"({}=)[^&]*", regex::escape(param_name));
                 let re = regex::Regex::new(&re_pattern).unwrap();
-                re.replace(&mutated_req.path, format!("${{1}}{}", p_str)).to_string()
+                re.replace(&mutated_req.path, format!("${{1}}{}", p_str))
+                    .to_string()
             } else if mutated_req.path.contains('?') {
                 format!("{}&{}={}", mutated_req.path, param_name, p_str)
             } else {
@@ -93,7 +94,9 @@ impl FuzzEngine {
             match ReplayEngine::execute(&mutated_req).await {
                 Ok(resp) => {
                     let len_diff = (resp.body.len() as isize - baseline_len as isize).abs();
-                    let is_anomaly = resp.status_code != baseline_status || len_diff > 200 || resp.status_code >= 500;
+                    let is_anomaly = resp.status_code != baseline_status
+                        || len_diff > 200
+                        || resp.status_code >= 500;
 
                     results.push(FuzzResult {
                         payload: p_str.to_string(),
@@ -128,6 +131,8 @@ mod tests {
     fn test_fuzz_dictionary_coverage() {
         assert!(DEFAULT_FUZZ_DICTIONARY.len() >= 10);
         assert!(DEFAULT_FUZZ_DICTIONARY.iter().any(|p| p.as_str() == "0"));
-        assert!(DEFAULT_FUZZ_DICTIONARY.iter().any(|p| p.as_str() == "{{7*7}}"));
+        assert!(DEFAULT_FUZZ_DICTIONARY
+            .iter()
+            .any(|p| p.as_str() == "{{7*7}}"));
     }
 }

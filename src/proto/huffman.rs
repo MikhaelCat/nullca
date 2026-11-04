@@ -120,7 +120,9 @@ impl HuffmanTree {
 
 /// Convenience decoding function using global static tree.
 pub fn decode_huffman(data: &[u8]) -> Result<Vec<u8>, HuffmanError> {
-    GLOBAL_HUFFMAN_TREE.get_or_init(HuffmanTree::build).decode(data)
+    GLOBAL_HUFFMAN_TREE
+        .get_or_init(HuffmanTree::build)
+        .decode(data)
 }
 
 /// Huffman-encode string bytes for testing and HPACK serialization.

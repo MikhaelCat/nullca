@@ -61,23 +61,38 @@ pub struct AuditReport {
 
 impl AuditReport {
     pub fn critical_count(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == AuditSeverity::Critical).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == AuditSeverity::Critical)
+            .count()
     }
 
     pub fn high_count(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == AuditSeverity::High).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == AuditSeverity::High)
+            .count()
     }
 
     pub fn medium_count(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == AuditSeverity::Medium).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == AuditSeverity::Medium)
+            .count()
     }
 
     pub fn low_count(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == AuditSeverity::Low).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == AuditSeverity::Low)
+            .count()
     }
 
     pub fn info_count(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == AuditSeverity::Info).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == AuditSeverity::Info)
+            .count()
     }
 }
 
@@ -116,8 +131,19 @@ impl SecurityAuditor {
                 res_headers.insert(h.name.to_ascii_lowercase(), h.value.clone());
             }
 
-            let res_body = entry.response.content.text.as_deref().unwrap_or("").as_bytes();
-            let req_body = entry.request.post_data.as_ref().map(|p| p.text.as_bytes()).unwrap_or(b"");
+            let res_body = entry
+                .response
+                .content
+                .text
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes();
+            let req_body = entry
+                .request
+                .post_data
+                .as_ref()
+                .map(|p| p.text.as_bytes())
+                .unwrap_or(b"");
 
             self.audit_single_exchange(
                 &endpoint,
@@ -131,7 +157,9 @@ impl SecurityAuditor {
         }
 
         // Sort findings: Critical -> High -> Medium -> Low -> Info
-        report.findings.sort_by_key(|a| std::cmp::Reverse(a.severity));
+        report
+            .findings
+            .sort_by_key(|a| std::cmp::Reverse(a.severity));
         report
     }
 
@@ -161,8 +189,13 @@ impl SecurityAuditor {
                     category: AuditCategory::MissingHsts,
                     title: "Malformed HSTS Header".to_string(),
                     endpoint: endpoint.to_string(),
-                    description: format!("Strict-Transport-Security header is present but lacks 'max-age': '{}'", hsts),
-                    remediation: "Set 'Strict-Transport-Security: max-age=31536000; includeSubDomains'".to_string(),
+                    description: format!(
+                        "Strict-Transport-Security header is present but lacks 'max-age': '{}'",
+                        hsts
+                    ),
+                    remediation:
+                        "Set 'Strict-Transport-Security: max-age=31536000; includeSubDomains'"
+                            .to_string(),
                 });
             } else if lower.contains("max-age=0") {
                 findings.push(AuditFinding {
@@ -170,8 +203,12 @@ impl SecurityAuditor {
                     category: AuditCategory::MissingHsts,
                     title: "Disabled HSTS (max-age=0)".to_string(),
                     endpoint: endpoint.to_string(),
-                    description: "HSTS max-age is set to 0, disabling browser transport protection.".to_string(),
-                    remediation: "Configure max-age to at least 15768000 (180 days) or 31536000 (1 year).".to_string(),
+                    description:
+                        "HSTS max-age is set to 0, disabling browser transport protection."
+                            .to_string(),
+                    remediation:
+                        "Configure max-age to at least 15768000 (180 days) or 31536000 (1 year)."
+                            .to_string(),
                 });
             }
         } else {
@@ -249,7 +286,10 @@ impl SecurityAuditor {
                 });
             }
         } else {
-            let content_type = res_headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+            let content_type = res_headers
+                .get("content-type")
+                .map(|s| s.as_str())
+                .unwrap_or("");
             if content_type.contains("text/html") {
                 findings.push(AuditFinding {
                     severity: AuditSeverity::Medium,
@@ -264,8 +304,14 @@ impl SecurityAuditor {
 
         // 5. Clickjacking Defense (X-Frame-Options or CSP frame-ancestors)
         let has_frame_options = res_headers.contains_key("x-frame-options");
-        let has_csp_frames = res_headers.get("content-security-policy").map(|c| c.contains("frame-ancestors")).unwrap_or(false);
-        let content_type = res_headers.get("content-type").map(|s| s.as_str()).unwrap_or("");
+        let has_csp_frames = res_headers
+            .get("content-security-policy")
+            .map(|c| c.contains("frame-ancestors"))
+            .unwrap_or(false);
+        let content_type = res_headers
+            .get("content-type")
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
         if content_type.contains("text/html") && !has_frame_options && !has_csp_frames {
             findings.push(AuditFinding {
@@ -281,16 +327,27 @@ impl SecurityAuditor {
         // 6. Insecure Cookies (Set-Cookie)
         if let Some(cookie) = res_headers.get("set-cookie") {
             let lower = cookie.to_ascii_lowercase();
-            let is_session_cookie = lower.contains("session") || lower.contains("auth") || lower.contains("token") || lower.contains("id");
+            let is_session_cookie = lower.contains("session")
+                || lower.contains("auth")
+                || lower.contains("token")
+                || lower.contains("id");
 
             if !lower.contains("secure") {
                 findings.push(AuditFinding {
-                    severity: if is_session_cookie { AuditSeverity::High } else { AuditSeverity::Medium },
+                    severity: if is_session_cookie {
+                        AuditSeverity::High
+                    } else {
+                        AuditSeverity::Medium
+                    },
                     category: AuditCategory::InsecureCookie,
                     title: "Cookie Missing 'Secure' Attribute".to_string(),
                     endpoint: endpoint.to_string(),
-                    description: format!("Set-Cookie header does not specify the 'Secure' flag: '{}'", cookie),
-                    remediation: "Append '; Secure' to all cookies transmitted over TLS.".to_string(),
+                    description: format!(
+                        "Set-Cookie header does not specify the 'Secure' flag: '{}'",
+                        cookie
+                    ),
+                    remediation: "Append '; Secure' to all cookies transmitted over TLS."
+                        .to_string(),
                 });
             }
 
@@ -325,8 +382,13 @@ impl SecurityAuditor {
                     category: AuditCategory::ServerInformationLeak,
                     title: "Detailed Server Banner Disclosure".to_string(),
                     endpoint: endpoint.to_string(),
-                    description: format!("Server header exposes exact software and version: '{}'", server),
-                    remediation: "Configure the web server to mask or disable banner version details.".to_string(),
+                    description: format!(
+                        "Server header exposes exact software and version: '{}'",
+                        server
+                    ),
+                    remediation:
+                        "Configure the web server to mask or disable banner version details."
+                            .to_string(),
                 });
             }
         }
@@ -362,17 +424,36 @@ impl SecurityAuditor {
                 category: AuditCategory::SecretLeak,
                 title: format!("Secret Leaked in Response Body ({:?})", s.kind),
                 endpoint: endpoint.to_string(),
-                description: format!("Detected leaked secret token '{}' in response payload.", s.raw_token),
-                remediation: "Immediately sanitize server responses and revoke leaked credentials.".to_string(),
+                description: format!(
+                    "Detected leaked secret token '{}' in response payload.",
+                    s.raw_token
+                ),
+                remediation: "Immediately sanitize server responses and revoke leaked credentials."
+                    .to_string(),
             });
         }
     }
 
     /// Prints a formatted audit report to standard output.
     pub fn print_report(&self, report: &AuditReport) {
-        println!("{}", "══════════════════════════════════════════════════════════════════════════".cyan().bold());
-        println!("{}", "            ⚡ NullCA Passive Security & Hygiene Audit Report             ".white().bold());
-        println!("{}", "══════════════════════════════════════════════════════════════════════════".cyan().bold());
+        println!(
+            "{}",
+            "══════════════════════════════════════════════════════════════════════════"
+                .cyan()
+                .bold()
+        );
+        println!(
+            "{}",
+            "            ⚡ NullCA Passive Security & Hygiene Audit Report             "
+                .white()
+                .bold()
+        );
+        println!(
+            "{}",
+            "══════════════════════════════════════════════════════════════════════════"
+                .cyan()
+                .bold()
+        );
         println!(
             "Total Exchanges Audited: {} | {} Critical | {} High | {} Medium | {} Low | {} Info",
             report.total_transactions.to_string().bold(),
@@ -385,7 +466,12 @@ impl SecurityAuditor {
         println!("{}", "─".repeat(74).dimmed());
 
         if report.findings.is_empty() {
-            println!("{}", "✅ No security posture or header issues identified!".green().bold());
+            println!(
+                "{}",
+                "✅ No security posture or header issues identified!"
+                    .green()
+                    .bold()
+            );
             return;
         }
 
@@ -398,9 +484,19 @@ impl SecurityAuditor {
                 AuditSeverity::Info => "[INFO]".dimmed(),
             };
 
-            println!("{}. {} {} - {}", (i + 1).to_string().bold(), sev_badge, f.title.bold(), f.endpoint.dimmed());
+            println!(
+                "{}. {} {} - {}",
+                (i + 1).to_string().bold(),
+                sev_badge,
+                f.title.bold(),
+                f.endpoint.dimmed()
+            );
             println!("   {}", f.description);
-            println!("   {} {}", "Remediation:".cyan().bold(), f.remediation.dimmed());
+            println!(
+                "   {} {}",
+                "Remediation:".cyan().bold(),
+                f.remediation.dimmed()
+            );
             println!();
         }
     }
@@ -462,9 +558,18 @@ mod tests {
 
         let report = auditor.audit_har_entries(&[entry]);
         assert!(!report.findings.is_empty());
-        assert!(report.findings.iter().any(|f| f.category == AuditCategory::MissingHsts));
-        assert!(report.findings.iter().any(|f| f.category == AuditCategory::MissingContentTypeOptions));
-        assert!(report.findings.iter().any(|f| f.category == AuditCategory::MissingClickjackingProtection));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.category == AuditCategory::MissingHsts));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.category == AuditCategory::MissingContentTypeOptions));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.category == AuditCategory::MissingClickjackingProtection));
     }
 
     #[test]
@@ -516,6 +621,9 @@ mod tests {
         };
 
         let report = auditor.audit_har_entries(&[entry]);
-        assert!(report.findings.iter().any(|f| f.severity == AuditSeverity::Critical));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.severity == AuditSeverity::Critical));
     }
 }

@@ -27,7 +27,9 @@ fn test_real_system_letsencrypt_root_exact_fingerprint() {
 
 #[test]
 fn test_real_system_microsoft_ecc_root_p384() {
-    let path = Path::new("/etc/ca-certificates/extracted/cadir/Microsoft_ECC_Root_Certificate_Authority_2017.pem");
+    let path = Path::new(
+        "/etc/ca-certificates/extracted/cadir/Microsoft_ECC_Root_Certificate_Authority_2017.pem",
+    );
     if !path.exists() {
         return;
     }
@@ -50,10 +52,22 @@ fn test_real_system_ca_certificates_bundle_all_119() {
     let bytes = std::fs::read(path).expect("Read system CA bundle");
     let certs = X509Parser::parse_all(&bytes);
 
-    assert!(certs.len() >= 100, "Must parse all certificates in system bundle (got {})", certs.len());
+    assert!(
+        certs.len() >= 100,
+        "Must parse all certificates in system bundle (got {})",
+        certs.len()
+    );
     for (i, c) in certs.iter().enumerate() {
-        assert!(!c.fingerprint_sha256.is_empty(), "Cert #{} has empty fingerprint", i);
-        assert!(!c.public_key_algorithm.is_empty(), "Cert #{} has empty algorithm", i);
+        assert!(
+            !c.fingerprint_sha256.is_empty(),
+            "Cert #{} has empty fingerprint",
+            i
+        );
+        assert!(
+            !c.public_key_algorithm.is_empty(),
+            "Cert #{} has empty algorithm",
+            i
+        );
     }
 }
 
@@ -66,9 +80,17 @@ fn test_real_system_directory_scan() {
 
     let summary = X509Parser::scan_directory(dir).expect("Directory scan");
     assert!(summary.total_certs_parsed >= 100);
-    assert_eq!(summary.parse_errors, 0, "No parse errors expected on standard system CA store");
-    assert!(summary.algorithm_counts.contains_key("RSA (4096-bit)") || summary.algorithm_counts.contains_key("RSA (2048-bit)"));
-    assert!(summary.algorithm_counts.contains_key("ECDSA (secp384r1 / NIST P-384)"));
+    assert_eq!(
+        summary.parse_errors, 0,
+        "No parse errors expected on standard system CA store"
+    );
+    assert!(
+        summary.algorithm_counts.contains_key("RSA (4096-bit)")
+            || summary.algorithm_counts.contains_key("RSA (2048-bit)")
+    );
+    assert!(summary
+        .algorithm_counts
+        .contains_key("ECDSA (secp384r1 / NIST P-384)"));
 }
 
 #[test]
@@ -154,7 +176,14 @@ fn test_synthetic_dilithium_post_quantum_certificate() {
     let serial = der_tlv(0x02, &[0x42]);
 
     // 2. Issuer: CN=PQC Root CA
-    let issuer_cn_attr = der_tlv(0x30, &[&der_tlv(0x06, &[0x55, 0x04, 0x03])[..], &der_tlv(0x13, b"PQC Root CA")[..]].concat());
+    let issuer_cn_attr = der_tlv(
+        0x30,
+        &[
+            &der_tlv(0x06, &[0x55, 0x04, 0x03])[..],
+            &der_tlv(0x13, b"PQC Root CA")[..],
+        ]
+        .concat(),
+    );
     let issuer_rdn = der_tlv(0x31, &issuer_cn_attr);
     let issuer_dn = der_tlv(0x30, &issuer_rdn);
 
@@ -162,7 +191,14 @@ fn test_synthetic_dilithium_post_quantum_certificate() {
     let validity = der_tlv(0x30, &[]);
 
     // 4. Subject: CN=Quantum Leaf
-    let subj_cn_attr = der_tlv(0x30, &[&der_tlv(0x06, &[0x55, 0x04, 0x03])[..], &der_tlv(0x13, b"Quantum Leaf")[..]].concat());
+    let subj_cn_attr = der_tlv(
+        0x30,
+        &[
+            &der_tlv(0x06, &[0x55, 0x04, 0x03])[..],
+            &der_tlv(0x13, b"Quantum Leaf")[..],
+        ]
+        .concat(),
+    );
     let subj_rdn = der_tlv(0x31, &subj_cn_attr);
     let subject_dn = der_tlv(0x30, &subj_rdn);
 
@@ -171,7 +207,15 @@ fn test_synthetic_dilithium_post_quantum_certificate() {
     let spki = der_tlv(0x30, &[&sig_alg_seq[..], &pubkey_bits[..]].concat());
 
     // Assemble TBSCertificate
-    let tbs_payload = [&serial[..], &sig_alg_seq[..], &issuer_dn[..], &validity[..], &subject_dn[..], &spki[..]].concat();
+    let tbs_payload = [
+        &serial[..],
+        &sig_alg_seq[..],
+        &issuer_dn[..],
+        &validity[..],
+        &subject_dn[..],
+        &spki[..],
+    ]
+    .concat();
     let tbs_cert = der_tlv(0x30, &tbs_payload);
 
     // Outer Certificate: TBSCertificate + SignatureAlgorithm + SignatureValue
@@ -179,7 +223,8 @@ fn test_synthetic_dilithium_post_quantum_certificate() {
     let cert_payload = [&tbs_cert[..], &sig_alg_seq[..], &sig_value[..]].concat();
     let outer_cert = der_tlv(0x30, &cert_payload);
 
-    let cert = X509Parser::parse_der(&outer_cert).expect("Must parse synthetic PQC Dilithium certificate");
+    let cert =
+        X509Parser::parse_der(&outer_cert).expect("Must parse synthetic PQC Dilithium certificate");
     assert_eq!(cert.public_key_algorithm, "ML-DSA-65 (Dilithium-3)");
     assert_eq!(cert.signature_algorithm, "ML-DSA-65 (Dilithium-3)");
     assert_eq!(cert.serial_number_hex, "42");
@@ -222,7 +267,14 @@ fn test_parse_x509_crl() {
     let version = der_tlv(0x02, &[0x01]);
 
     // 2. Issuer DN: CN=Test CRL Issuer
-    let issuer_cn_attr = der_tlv(0x30, &[&der_tlv(0x06, &[0x55, 0x04, 0x03])[..], &der_tlv(0x13, b"Test CRL Issuer")[..]].concat());
+    let issuer_cn_attr = der_tlv(
+        0x30,
+        &[
+            &der_tlv(0x06, &[0x55, 0x04, 0x03])[..],
+            &der_tlv(0x13, b"Test CRL Issuer")[..],
+        ]
+        .concat(),
+    );
     let issuer_rdn = der_tlv(0x31, &issuer_cn_attr);
     let issuer_dn = der_tlv(0x30, &issuer_rdn);
 
@@ -239,12 +291,23 @@ fn test_parse_x509_crl() {
     let rev_list = der_tlv(0x30, &rev_entry);
 
     // Assemble TBSCertList
-    let tbs_payload = [&version[..], &sig_alg_seq[..], &issuer_dn[..], &this_update[..], &next_update[..], &rev_list[..]].concat();
+    let tbs_payload = [
+        &version[..],
+        &sig_alg_seq[..],
+        &issuer_dn[..],
+        &this_update[..],
+        &next_update[..],
+        &rev_list[..],
+    ]
+    .concat();
     let tbs_crl = der_tlv(0x30, &tbs_payload);
 
     // Outer CRL
     let sig_bits = der_tlv(0x03, &[0x00, 0xAA, 0xBB, 0xCC]);
-    let outer_crl = der_tlv(0x30, &[&tbs_crl[..], &sig_alg_seq[..], &sig_bits[..]].concat());
+    let outer_crl = der_tlv(
+        0x30,
+        &[&tbs_crl[..], &sig_alg_seq[..], &sig_bits[..]].concat(),
+    );
 
     let crl = X509Parser::parse_crl(&outer_crl).expect("Must parse synthetic CRL");
     assert_eq!(crl.version, "v2");
@@ -256,14 +319,25 @@ fn test_parse_x509_crl() {
 
 #[test]
 fn test_live_remote_tls_fetch_google() {
-    let certs = X509Parser::fetch_remote_certificates("google.com:443").expect("Fetch live Google TLS chain");
-    assert!(!certs.is_empty(), "Must receive at least 1 certificate from google.com");
+    let certs = X509Parser::fetch_remote_certificates("google.com:443")
+        .expect("Fetch live Google TLS chain");
+    assert!(
+        !certs.is_empty(),
+        "Must receive at least 1 certificate from google.com"
+    );
 
     let leaf = &certs[0];
     assert!(
-        leaf.subject_dn.contains("google.com") || leaf.subject_alt_names.iter().any(|s| s.contains("google.com")),
+        leaf.subject_dn.contains("google.com")
+            || leaf
+                .subject_alt_names
+                .iter()
+                .any(|s| s.contains("google.com")),
         "Leaf certificate must be for google.com"
     );
-    assert!(leaf.validity_status.starts_with("VALID"), "Google cert should be valid");
+    assert!(
+        leaf.validity_status.starts_with("VALID"),
+        "Google cert should be valid"
+    );
     assert!(!leaf.fingerprint_sha256.is_empty());
 }

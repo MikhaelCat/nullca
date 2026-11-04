@@ -21,6 +21,7 @@ nullca <COMMAND> [OPTIONS]
 | `audit` | | Run passive security posture, header hygiene, and secret leak audit |
 | `export-sslkeylog` | | Export TLS session secrets in standard NSS SSLKEYLOGFILE format for Wireshark |
 | `web` | | Launch embedded Web Cockpit dashboard and REST API daemon |
+| `fuzz` | | Active parameter fuzzing and boundary mutation testing against target endpoint |
 | `replay` | | Replay and tamper an HTTP request against a target server with microsecond latency metrics |
 | `diff` | | Compare two intercepted packets, payload dumps, or HTTP messages side-by-side |
 | `scan-secrets` | | Scan a file or dump for leaked JWT tokens, API keys, and CTF flags |
@@ -107,7 +108,17 @@ nullca web --port 8080
 # Open http://localhost:8080 in any browser or mobile device
 ```
 
-### 9. `nullca replay`
+### 9. `nullca fuzz`
+High-throughput parameter mutation and fuzzing engine for identifying server crashes (HTTP 500), input validation errors, and timing anomalies.
+```bash
+# Fuzz an endpoint parameter using default boundary dictionary
+nullca fuzz --target 127.0.0.1:8080 --method GET --path "/api/v1/user?id=1" --param id
+
+# Fuzz with custom wordlist and structured JSON output
+nullca fuzz --target api.local:443 --path "/search?q=test" --param q --wordlist /tmp/payloads.txt --json
+```
+
+### 10. `nullca replay`
 Replays an HTTP request with custom headers or body, measuring sub-millisecond network timings (TTFB, connect latency).
 ```bash
 nullca replay --target 127.0.0.1:8080 --method POST --path /api/v1/login \

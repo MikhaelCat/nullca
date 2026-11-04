@@ -45,14 +45,21 @@ static GLOBAL_SECRET_DETECTOR: std::sync::OnceLock<SecretDetector> = std::sync::
 impl SecretDetector {
     pub fn new() -> Self {
         Self {
-            jwt_regex: Regex::new(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}").unwrap(),
+            jwt_regex: Regex::new(
+                r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+            )
+            .unwrap(),
             basic_regex: Regex::new(r"(?i)Basic\s+([A-Za-z0-9+/=]{8,})").unwrap(),
             aws_regex: Regex::new(r"\b(AKIA[0-9A-Z]{16})\b").unwrap(),
-            github_regex: Regex::new(r"\b(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})\b").unwrap(),
+            github_regex: Regex::new(r"\b(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{82})\b")
+                .unwrap(),
             stripe_regex: Regex::new(r"\b(sk_live_[0-9a-zA-Z]{24})\b").unwrap(),
             slack_regex: Regex::new(r"\b(xox[baprs]-[0-9a-zA-Z]{10,48})\b").unwrap(),
             privkey_regex: Regex::new(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----").unwrap(),
-            ctf_flag_regex: Regex::new(r"(?i)(flag\{[^\{\}]{4,64}\}|THEM\{[^\{\}]{4,64}\}|ctf\{[^\{\}]{4,64}\})").unwrap(),
+            ctf_flag_regex: Regex::new(
+                r"(?i)(flag\{[^\{\}]{4,64}\}|THEM\{[^\{\}]{4,64}\}|ctf\{[^\{\}]{4,64}\})",
+            )
+            .unwrap(),
         }
     }
 }
@@ -160,7 +167,9 @@ impl SecretDetector {
 }
 
 pub fn scan_secrets(data: &[u8]) -> Vec<DetectedSecret> {
-    GLOBAL_SECRET_DETECTOR.get_or_init(SecretDetector::new).scan_payload(data)
+    GLOBAL_SECRET_DETECTOR
+        .get_or_init(SecretDetector::new)
+        .scan_payload(data)
 }
 
 /// Decodes header and payload of a JWT without verifying signature.
@@ -177,7 +186,9 @@ fn decode_jwt_payload(jwt: &str) -> Option<String> {
             padded.push('=');
         }
         let bytes = URL_SAFE_NO_PAD.decode(part).ok().or_else(|| {
-            base64::engine::general_purpose::STANDARD.decode(&padded).ok()
+            base64::engine::general_purpose::STANDARD
+                .decode(&padded)
+                .ok()
         })?;
         String::from_utf8(bytes).ok()
     };
@@ -206,7 +217,9 @@ fn decode_basic_auth(b64: &str) -> Option<String> {
     while !padded.len().is_multiple_of(4) {
         padded.push('=');
     }
-    let bytes = base64::engine::general_purpose::STANDARD.decode(padded).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(padded)
+        .ok()?;
     let creds = String::from_utf8(bytes).ok()?;
     if let Some((user, pass)) = creds.split_once(':') {
         Some(format!("Username: '{}', Password: '{}'", user, pass))
@@ -238,7 +251,9 @@ mod tests {
         let payload = b"Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=\r\nCookie: flag{super_secret_ctf_win_1337}";
         let secrets = scan_secrets(payload);
         assert_eq!(secrets.len(), 2);
-        assert!(secrets.iter().any(|s| s.kind == SecretKind::BasicAuthCredentials));
+        assert!(secrets
+            .iter()
+            .any(|s| s.kind == SecretKind::BasicAuthCredentials));
         assert!(secrets.iter().any(|s| s.kind == SecretKind::CtfFlag));
     }
 }

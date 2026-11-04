@@ -156,7 +156,13 @@ mod tests {
     fn test_parse_http1_request() {
         let raw = b"GET /api/v1/users HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl/8.0\r\nAccept: application/json\r\n\r\n";
         let parsed = Http1Parser::parse(raw).expect("Failed to parse request");
-        if let Http1Message::Request { method, uri, headers, .. } = parsed {
+        if let Http1Message::Request {
+            method,
+            uri,
+            headers,
+            ..
+        } = parsed
+        {
             assert_eq!(method, "GET");
             assert_eq!(uri, "/api/v1/users");
             assert_eq!(headers.get("host").unwrap(), "example.com");
@@ -170,7 +176,10 @@ mod tests {
     fn test_parse_http1_response_chunked() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nMozilla\r\n9\r\nDeveloper\r\n0\r\n\r\n";
         let parsed = Http1Parser::parse(raw).expect("Failed to parse response");
-        if let Http1Message::Response { status_code, body, .. } = parsed {
+        if let Http1Message::Response {
+            status_code, body, ..
+        } = parsed
+        {
             assert_eq!(status_code, 200);
             assert_eq!(String::from_utf8_lossy(&body), "MozillaDeveloper");
         } else {

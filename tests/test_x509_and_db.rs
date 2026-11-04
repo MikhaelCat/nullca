@@ -24,7 +24,16 @@ Af8wCgYIKoZIzj0EAwIDSAAwRQIhAK3cAp0kvxSVWwBQBi+HFXBkgTEZ7avy8UA1
 fn test_event_protocol_auto_detection_non_http() {
     // 1. Redis RESP
     let redis_wire = b"*2\r\n$4\r\nAUTH\r\n$12\r\nsecret_token\r\n";
-    let ev_redis = TlsEvent::new(0, 1, 1, 3, Direction::Egress, "redis-cli".into(), redis_wire.to_vec(), None);
+    let ev_redis = TlsEvent::new(
+        0,
+        1,
+        1,
+        3,
+        Direction::Egress,
+        "redis-cli".into(),
+        redis_wire.to_vec(),
+        None,
+    );
     assert_eq!(ev_redis.protocol(), ProtocolType::Redis);
 
     // 2. Postgres Query
@@ -38,11 +47,29 @@ fn test_event_protocol_auto_detection_non_http() {
 
     // 3. SMTP Mail
     let smtp_wire = b"MAIL FROM:<sender@secure.org>\r\n";
-    let ev_smtp = TlsEvent::new(0, 1, 1, 3, Direction::Egress, "postfix".into(), smtp_wire.to_vec(), None);
+    let ev_smtp = TlsEvent::new(
+        0,
+        1,
+        1,
+        3,
+        Direction::Egress,
+        "postfix".into(),
+        smtp_wire.to_vec(),
+        None,
+    );
     assert_eq!(ev_smtp.protocol(), ProtocolType::Smtp);
 
     // 4. X.509 Certificate
     let pem_wire = b"-----BEGIN CERTIFICATE-----\nMIIBdDCCARqgAwIBAgIUYItNEQKCk1EPmrmeHl4Oqx85XaswCgYIKoZIzj0EAwIw\n-----END CERTIFICATE-----\n";
-    let ev_x509 = TlsEvent::new(0, 1, 1, 3, Direction::Ingress, "curl".into(), pem_wire.to_vec(), None);
+    let ev_x509 = TlsEvent::new(
+        0,
+        1,
+        1,
+        3,
+        Direction::Ingress,
+        "curl".into(),
+        pem_wire.to_vec(),
+        None,
+    );
     assert_eq!(ev_x509.protocol(), ProtocolType::X509);
 }

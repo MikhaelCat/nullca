@@ -1,7 +1,7 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 use nullca::engine::event::{Direction, TlsEvent};
 use nullca::ui::dashboard::{ActivePane, DashboardState};
 use nullca::ui::repeater::{RepeaterField, RepeaterState};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
 #[test]
 fn test_dashboard_state_navigation_and_scrolling() {
@@ -139,7 +139,10 @@ fn test_repeater_state_from_event_and_editing() {
     assert_eq!(req.port, 8443);
     assert_eq!(req.path, "/api/v1/authx");
     assert_eq!(req.body, b"{\"user\":\"admin\"}".to_vec());
-    assert_eq!(req.headers.get("content-type").map(|s| s.as_str()), Some("application/json"));
+    assert_eq!(
+        req.headers.get("content-type").map(|s| s.as_str()),
+        Some("application/json")
+    );
 }
 
 #[test]
@@ -171,4 +174,72 @@ fn test_repeater_ctrl_r_dispatch_trigger() {
     assert_eq!(req.method, "GET");
     assert_eq!(req.path, "/health");
     assert!(rep.is_transmitting);
+}
+
+#[test]
+fn test_dashboard_idor_detection_and_drop_counter() {
+    let mut state = DashboardState::new();
+
+    // Set dropped counter
+    state
+        .dropped_events
+        .store(42, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        state
+            .dropped_events
+            .load(std::sync::atomic::Ordering::Relaxed),
+        42
+    );
+
+    // 1. User Alice requests order 101
+    let req1 = TlsEvent::new(
+        1000, 111, 111, 4, Direction::Egress, "curl".into(),
+        b"GET /api/orders/101 HTTP/1.1\r\nHost: api.com\r\nAuthorization: Bearer token_alice\r\n\r\n".to_vec(),
+        None,
+    );
+    state.push_event(req1);
+
+    let resp1 = TlsEvent::new(
+        1050,
+        111,
+        111,
+        4,
+        Direction::Ingress,
+        "curl".into(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+        None,
+    );
+    state.push_event(resp1);
+    assert_eq!(state.idor_detector.alerts.len(), 0);
+
+    // 2. User Bob requests order 101 -> 200 OK (IDOR bypass!)
+    let req2 = TlsEvent::new(
+        2000,
+        222,
+        222,
+        5,
+        Direction::Egress,
+        "curl".into(),
+        b"GET /api/orders/101 HTTP/1.1\r\nHost: api.com\r\nAuthorization: Bearer token_bob\r\n\r\n"
+            .to_vec(),
+        None,
+    );
+    state.push_event(req2);
+
+    let resp2 = TlsEvent::new(
+        2050,
+        222,
+        222,
+        5,
+        Direction::Ingress,
+        "curl".into(),
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec(),
+        None,
+    );
+    state.push_event(resp2);
+
+    assert_eq!(state.idor_detector.alerts.len(), 1);
+    assert_eq!(state.idor_detector.alerts[0].target_resource_id, "101");
+    // Packet index 3 (the response) should be tagged with IDOR alert
+    assert!(state.idor_event_indices.contains(&3));
 }

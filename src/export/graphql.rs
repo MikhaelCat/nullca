@@ -69,7 +69,11 @@ impl GraphQLSchema {
         for (type_name, obj_type) in &self.types {
             out.push_str(&format!("type {} {{\n", type_name));
             for (field, field_type) in &obj_type.fields {
-                out.push_str(&format!("  {}: {}\n", field, field_type.to_graphql_string()));
+                out.push_str(&format!(
+                    "  {}: {}\n",
+                    field,
+                    field_type.to_graphql_string()
+                ));
             }
             out.push_str("}\n\n");
         }
@@ -105,9 +109,13 @@ impl GraphQLSynthesizer {
             for (root_field, val) in data {
                 let inferred_type = Self::infer_type(schema, root_field, val);
                 if is_mutation {
-                    schema.mutation_fields.insert(root_field.clone(), inferred_type);
+                    schema
+                        .mutation_fields
+                        .insert(root_field.clone(), inferred_type);
                 } else {
-                    schema.query_fields.insert(root_field.clone(), inferred_type);
+                    schema
+                        .query_fields
+                        .insert(root_field.clone(), inferred_type);
                 }
             }
         }
@@ -119,7 +127,10 @@ impl GraphQLSynthesizer {
             Value::Bool(_) => GqlFieldType::Boolean,
             Value::Number(n) => {
                 if n.is_i64() || n.is_u64() {
-                    if field_name.eq_ignore_ascii_case("id") || field_name.ends_with("_id") || field_name.ends_with("Id") {
+                    if field_name.eq_ignore_ascii_case("id")
+                        || field_name.ends_with("_id")
+                        || field_name.ends_with("Id")
+                    {
                         GqlFieldType::Id
                     } else {
                         GqlFieldType::Int
@@ -129,7 +140,10 @@ impl GraphQLSynthesizer {
                 }
             }
             Value::String(_) => {
-                if field_name.eq_ignore_ascii_case("id") || field_name.ends_with("_id") || field_name.ends_with("Id") {
+                if field_name.eq_ignore_ascii_case("id")
+                    || field_name.ends_with("_id")
+                    || field_name.ends_with("Id")
+                {
                     GqlFieldType::Id
                 } else {
                     GqlFieldType::String
@@ -152,10 +166,13 @@ impl GraphQLSynthesizer {
                     fields.insert(k.clone(), field_type);
                 }
 
-                let obj = schema.types.entry(type_name.clone()).or_insert_with(|| GqlObjectType {
-                    name: type_name.clone(),
-                    fields: BTreeMap::new(),
-                });
+                let obj = schema
+                    .types
+                    .entry(type_name.clone())
+                    .or_insert_with(|| GqlObjectType {
+                        name: type_name.clone(),
+                        fields: BTreeMap::new(),
+                    });
 
                 for (k, v) in fields {
                     obj.fields.insert(k, v);
@@ -198,7 +215,8 @@ mod tests {
 
         let req = json!({
             "query": "query GetUserProfile { user(id: 1) { id username email score roles } }"
-        }).to_string();
+        })
+        .to_string();
 
         let res = json!({
             "data": {
@@ -210,7 +228,8 @@ mod tests {
                     "roles": ["admin", "researcher"]
                 }
             }
-        }).to_string();
+        })
+        .to_string();
 
         GraphQLSynthesizer::ingest_exchange(&mut schema, req.as_bytes(), res.as_bytes());
 
@@ -219,7 +238,10 @@ mod tests {
 
         let user_type = schema.types.get("User").unwrap();
         assert_eq!(user_type.fields.get("id"), Some(&GqlFieldType::Id));
-        assert_eq!(user_type.fields.get("username"), Some(&GqlFieldType::String));
+        assert_eq!(
+            user_type.fields.get("username"),
+            Some(&GqlFieldType::String)
+        );
         assert_eq!(user_type.fields.get("score"), Some(&GqlFieldType::Float));
 
         let sdl = schema.to_sdl_string();

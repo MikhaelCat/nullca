@@ -56,6 +56,14 @@ pub struct TlsEvent {
     pub data: Vec<u8>,
     pub data_len: usize,
     pub latency_us: Option<u64>,
+    #[serde(default)]
+    pub src_addr: Option<String>,
+    #[serde(default)]
+    pub dst_addr: Option<String>,
+    #[serde(default)]
+    pub src_port: Option<u16>,
+    #[serde(default)]
+    pub dst_port: Option<u16>,
 }
 
 impl TlsEvent {
@@ -81,6 +89,42 @@ impl TlsEvent {
             data,
             data_len,
             latency_us,
+            src_addr: None,
+            dst_addr: None,
+            src_port: None,
+            dst_port: None,
+        }
+    }
+
+    pub fn with_socket_info(
+        mut self,
+        src_addr: Option<String>,
+        dst_addr: Option<String>,
+        src_port: Option<u16>,
+        dst_port: Option<u16>,
+    ) -> Self {
+        self.src_addr = src_addr;
+        self.dst_addr = dst_addr;
+        self.src_port = src_port;
+        self.dst_port = dst_port;
+        self
+    }
+
+    /// Attempts to resolve source and destination endpoints from /proc for this event.
+    pub fn resolve_endpoints(&mut self) {
+        if self.src_addr.is_none() && self.pid > 0 && self.fd > 0 {
+            if let Some((src, sp, dst, dp)) =
+                crate::engine::discover::SocketResolver::resolve_endpoints(
+                    self.pid,
+                    self.fd,
+                    self.direction,
+                )
+            {
+                self.src_addr = Some(src);
+                self.src_port = Some(sp);
+                self.dst_addr = Some(dst);
+                self.dst_port = Some(dp);
+            }
         }
     }
 
@@ -96,7 +140,14 @@ impl TlsEvent {
 
         // Check HTTP/1.1 methods or status line
         let http1_verbs: [&[u8]; 9] = [
-            b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ",
+            b"GET ",
+            b"POST ",
+            b"PUT ",
+            b"DELETE ",
+            b"HEAD ",
+            b"OPTIONS ",
+            b"PATCH ",
+            b"CONNECT ",
             b"HTTP/1.",
         ];
         if http1_verbs.iter().any(|verb| slice.starts_with(verb)) {
@@ -107,7 +158,11 @@ impl TlsEvent {
         if slice.starts_with(b"-----BEGIN CERTIFICATE-----") {
             return ProtocolType::X509;
         }
-        if slice.len() > 30 && slice[0] == 0x30 && slice[1] == 0x82 && crate::proto::x509::X509Parser::parse(slice).is_some() {
+        if slice.len() > 30
+            && slice[0] == 0x30
+            && slice[1] == 0x82
+            && crate::proto::x509::X509Parser::parse(slice).is_some()
+        {
             return ProtocolType::X509;
         }
 
@@ -133,7 +188,8 @@ impl TlsEvent {
 
         // Check HTTP/2 frame pattern (Length 3 bytes, Type 1 byte, Flags 1 byte, StreamID 4 bytes)
         if slice.len() >= 9 {
-            let frame_len = ((slice[0] as usize) << 16) | ((slice[1] as usize) << 8) | (slice[2] as usize);
+            let frame_len =
+                ((slice[0] as usize) << 16) | ((slice[1] as usize) << 8) | (slice[2] as usize);
             let frame_type = slice[3];
             let stream_id = u32::from_be_bytes([slice[5] & 0x7f, slice[6], slice[7], slice[8]]);
             // Valid HTTP/2 frame types are 0x0 to 0x9

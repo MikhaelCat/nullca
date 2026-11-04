@@ -275,12 +275,17 @@ impl DiffEngine {
         ));
         out.push_str(&format!(
             "Summary: {} {} {}\n\n",
-            format!("+{} additions", diff.total_additions).green().bold(),
+            format!("+{} additions", diff.total_additions)
+                .green()
+                .bold(),
             "|".dimmed(),
             format!("-{} deletions", diff.total_deletions).red().bold(),
         ));
 
-        out.push_str(&format!("{}\n", "── Headers ────────────────────────".bold().yellow()));
+        out.push_str(&format!(
+            "{}\n",
+            "── Headers ────────────────────────".bold().yellow()
+        ));
         for h in &diff.header_diffs {
             match h.kind {
                 DiffKind::Added => {
@@ -318,7 +323,10 @@ impl DiffEngine {
             }
         }
 
-        out.push_str(&format!("\n{}\n", "── Body / Payload ─────────────────".bold().yellow()));
+        out.push_str(&format!(
+            "\n{}\n",
+            "── Body / Payload ─────────────────".bold().yellow()
+        ));
         for b in &diff.body_diffs {
             match b.kind {
                 DiffKind::Added => {
@@ -342,66 +350,146 @@ impl DiffEngine {
         let mut lines = Vec::new();
 
         lines.push(Line::from(vec![
-            Span::styled("Diff: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("#{} ({})", diff.event_a_id + 1, diff.comm_a), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "Diff: ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("#{} ({})", diff.event_a_id + 1, diff.comm_a),
+                Style::default().fg(Color::Yellow),
+            ),
             Span::raw(" vs "),
-            Span::styled(format!("#{} ({})", diff.event_b_id + 1, diff.comm_b), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("#{} ({})", diff.event_b_id + 1, diff.comm_b),
+                Style::default().fg(Color::Green),
+            ),
             Span::raw(" | "),
-            Span::styled(format!("+{}", diff.total_additions), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("+{}", diff.total_additions),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
-            Span::styled(format!("-{}", diff.total_deletions), Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("-{}", diff.total_deletions),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]));
         lines.push(Line::from(""));
 
-        lines.push(Line::from(Span::styled("── Headers ──", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "── Headers ──",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
         for h in &diff.header_diffs {
             match h.kind {
                 DiffKind::Added => {
                     lines.push(Line::from(vec![
-                        Span::styled("+ ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
-                        Span::styled(format!("{}: ", h.name), Style::default().fg(Color::LightGreen)),
-                        Span::styled(h.new_val.clone().unwrap_or_default(), Style::default().fg(Color::White)),
+                        Span::styled(
+                            "+ ",
+                            Style::default()
+                                .fg(Color::LightGreen)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{}: ", h.name),
+                            Style::default().fg(Color::LightGreen),
+                        ),
+                        Span::styled(
+                            h.new_val.clone().unwrap_or_default(),
+                            Style::default().fg(Color::White),
+                        ),
                     ]));
                 }
                 DiffKind::Removed => {
                     lines.push(Line::from(vec![
-                        Span::styled("- ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
-                        Span::styled(format!("{}: ", h.name), Style::default().fg(Color::LightRed)),
-                        Span::styled(h.old_val.clone().unwrap_or_default(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "- ",
+                            Style::default()
+                                .fg(Color::LightRed)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{}: ", h.name),
+                            Style::default().fg(Color::LightRed),
+                        ),
+                        Span::styled(
+                            h.old_val.clone().unwrap_or_default(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]));
                 }
                 DiffKind::Modified => {
                     lines.push(Line::from(vec![
-                        Span::styled("~ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "~ ",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(format!("{}: ", h.name), Style::default().fg(Color::Yellow)),
-                        Span::styled(format!("{} ", h.old_val.clone().unwrap_or_default()), Style::default().fg(Color::LightRed)),
+                        Span::styled(
+                            format!("{} ", h.old_val.clone().unwrap_or_default()),
+                            Style::default().fg(Color::LightRed),
+                        ),
                         Span::raw("-> "),
-                        Span::styled(h.new_val.clone().unwrap_or_default(), Style::default().fg(Color::LightGreen)),
+                        Span::styled(
+                            h.new_val.clone().unwrap_or_default(),
+                            Style::default().fg(Color::LightGreen),
+                        ),
                     ]));
                 }
                 DiffKind::Equal => {
                     lines.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled(format!("{}: ", h.name), Style::default().fg(Color::DarkGray)),
-                        Span::styled(h.old_val.clone().unwrap_or_default(), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{}: ", h.name),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            h.old_val.clone().unwrap_or_default(),
+                            Style::default().fg(Color::DarkGray),
+                        ),
                     ]));
                 }
             }
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("── Body / Payload ──", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "── Body / Payload ──",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
         for b in &diff.body_diffs {
             match b.kind {
                 DiffKind::Added => {
                     lines.push(Line::from(vec![
-                        Span::styled("+ ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "+ ",
+                            Style::default()
+                                .fg(Color::LightGreen)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(b.content.clone(), Style::default().fg(Color::LightGreen)),
                     ]));
                 }
                 DiffKind::Removed => {
                     lines.push(Line::from(vec![
-                        Span::styled("- ", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "- ",
+                            Style::default()
+                                .fg(Color::LightRed)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(b.content.clone(), Style::default().fg(Color::LightRed)),
                     ]));
                 }
@@ -430,7 +518,10 @@ mod tests {
 
         let diff = DiffEngine::diff_text(a, b);
         let added: Vec<&DiffLine> = diff.iter().filter(|d| d.kind == DiffKind::Added).collect();
-        let removed: Vec<&DiffLine> = diff.iter().filter(|d| d.kind == DiffKind::Removed).collect();
+        let removed: Vec<&DiffLine> = diff
+            .iter()
+            .filter(|d| d.kind == DiffKind::Removed)
+            .collect();
 
         assert_eq!(added.len(), 2); // line2_modified and line4
         assert_eq!(removed.len(), 1); // line2

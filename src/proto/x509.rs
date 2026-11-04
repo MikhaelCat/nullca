@@ -132,8 +132,14 @@ impl X509Parser {
         let mut results = Vec::new();
         let markers = [
             ("-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"),
-            ("-----BEGIN X509 CERTIFICATE-----", "-----END X509 CERTIFICATE-----"),
-            ("-----BEGIN TRUSTED CERTIFICATE-----", "-----END TRUSTED CERTIFICATE-----"),
+            (
+                "-----BEGIN X509 CERTIFICATE-----",
+                "-----END X509 CERTIFICATE-----",
+            ),
+            (
+                "-----BEGIN TRUSTED CERTIFICATE-----",
+                "-----END TRUSTED CERTIFICATE-----",
+            ),
         ];
 
         let mut search_pos = 0;
@@ -201,12 +207,20 @@ impl X509Parser {
             .output()?;
 
         if !output.status.success() && output.stdout.is_empty() {
-            return Err(anyhow::anyhow!("Failed to complete TLS handshake with remote target {}:{}", host, port));
+            return Err(anyhow::anyhow!(
+                "Failed to complete TLS handshake with remote target {}:{}",
+                host,
+                port
+            ));
         }
 
         let certs = Self::parse_all(&output.stdout);
         if certs.is_empty() {
-            return Err(anyhow::anyhow!("No X.509 certificates extracted from TLS handshake with {}:{}", host, port));
+            return Err(anyhow::anyhow!(
+                "No X.509 certificates extracted from TLS handshake with {}:{}",
+                host,
+                port
+            ));
         }
 
         Ok(certs)
@@ -249,8 +263,12 @@ impl X509Parser {
                                 valid_count += 1;
                             }
 
-                            *algorithm_counts.entry(cert.public_key_algorithm.clone()).or_insert(0) += 1;
-                            *signature_counts.entry(cert.signature_algorithm.clone()).or_insert(0) += 1;
+                            *algorithm_counts
+                                .entry(cert.public_key_algorithm.clone())
+                                .or_insert(0) += 1;
+                            *signature_counts
+                                .entry(cert.signature_algorithm.clone())
+                                .or_insert(0) += 1;
                             certificates.push(cert);
                         }
                     }
@@ -300,7 +318,10 @@ impl X509Parser {
         let mut tbs_cursor = tbs_content;
 
         // Optional [0] EXPLICIT Version
-        let version = if !tbs_cursor.is_empty() && (tbs_cursor[0] & 0xC0) == 0x80 && (tbs_cursor[0] & 0x1F) == 0 {
+        let version = if !tbs_cursor.is_empty()
+            && (tbs_cursor[0] & 0xC0) == 0x80
+            && (tbs_cursor[0] & 0x1F) == 0
+        {
             if let Some((_, v_content, rem)) = Self::read_tlv(tbs_cursor) {
                 tbs_cursor = rem;
                 if let Some((0x02, v_val, _)) = Self::read_tlv(v_content) {
@@ -332,16 +353,17 @@ impl X509Parser {
         };
 
         // Signature Algorithm inside TBSCertificate (SEQUENCE)
-        let tbs_sig_algo = if let Some((sig_alg_tag, sig_content, sig_rem)) = Self::read_tlv(tbs_cursor) {
-            tbs_cursor = sig_rem;
-            if sig_alg_tag == 0x30 {
-                Self::lookup_algorithm_name(sig_content)
+        let tbs_sig_algo =
+            if let Some((sig_alg_tag, sig_content, sig_rem)) = Self::read_tlv(tbs_cursor) {
+                tbs_cursor = sig_rem;
+                if sig_alg_tag == 0x30 {
+                    Self::lookup_algorithm_name(sig_content)
+                } else {
+                    "Unknown".into()
+                }
             } else {
                 "Unknown".into()
-            }
-        } else {
-            "Unknown".into()
-        };
+            };
 
         let signature_algorithm = if outer_sig_alg != "Unknown" {
             outer_sig_alg
@@ -350,54 +372,58 @@ impl X509Parser {
         };
 
         // Issuer (Name SEQUENCE)
-        let (issuer_dn, issuer_cn, issuer_org, _) = if let Some((issuer_tag, issuer_content, issuer_rem)) = Self::read_tlv(tbs_cursor) {
-            tbs_cursor = issuer_rem;
-            if issuer_tag == 0x30 {
-                Self::parse_distinguished_name(issuer_content)
+        let (issuer_dn, issuer_cn, issuer_org, _) =
+            if let Some((issuer_tag, issuer_content, issuer_rem)) = Self::read_tlv(tbs_cursor) {
+                tbs_cursor = issuer_rem;
+                if issuer_tag == 0x30 {
+                    Self::parse_distinguished_name(issuer_content)
+                } else {
+                    ("Unknown".into(), None, None, None)
+                }
             } else {
                 ("Unknown".into(), None, None, None)
-            }
-        } else {
-            ("Unknown".into(), None, None, None)
-        };
+            };
 
         // Validity (SEQUENCE with NotBefore, NotAfter)
-        let (not_before, not_after, validity_status) = if let Some((val_tag, val_content, val_rem)) = Self::read_tlv(tbs_cursor) {
-            tbs_cursor = val_rem;
-            if val_tag == 0x30 {
-                Self::extract_validity(val_content)
+        let (not_before, not_after, validity_status) =
+            if let Some((val_tag, val_content, val_rem)) = Self::read_tlv(tbs_cursor) {
+                tbs_cursor = val_rem;
+                if val_tag == 0x30 {
+                    Self::extract_validity(val_content)
+                } else {
+                    (None, None, "Unknown".into())
+                }
             } else {
                 (None, None, "Unknown".into())
-            }
-        } else {
-            (None, None, "Unknown".into())
-        };
+            };
 
         // Subject (Name SEQUENCE)
-        let (subject_dn, subject_cn, subject_org, subject_country, subject_ou) = if let Some((subj_tag, subj_content, subj_rem)) = Self::read_tlv(tbs_cursor) {
-            tbs_cursor = subj_rem;
-            if subj_tag == 0x30 {
-                let (dn, cn, org, c) = Self::parse_distinguished_name(subj_content);
-                let ou = Self::extract_attribute_by_oid(subj_content, &[0x55, 0x04, 0x0B]);
-                (dn, cn, org, c, ou)
+        let (subject_dn, subject_cn, subject_org, subject_country, subject_ou) =
+            if let Some((subj_tag, subj_content, subj_rem)) = Self::read_tlv(tbs_cursor) {
+                tbs_cursor = subj_rem;
+                if subj_tag == 0x30 {
+                    let (dn, cn, org, c) = Self::parse_distinguished_name(subj_content);
+                    let ou = Self::extract_attribute_by_oid(subj_content, &[0x55, 0x04, 0x0B]);
+                    (dn, cn, org, c, ou)
+                } else {
+                    ("Unknown".into(), None, None, None, None)
+                }
             } else {
                 ("Unknown".into(), None, None, None, None)
-            }
-        } else {
-            ("Unknown".into(), None, None, None, None)
-        };
+            };
 
         // SubjectPublicKeyInfo (SEQUENCE)
-        let public_key_algorithm = if let Some((pk_tag, pk_content, pk_rem)) = Self::read_tlv(tbs_cursor) {
-            tbs_cursor = pk_rem;
-            if pk_tag == 0x30 {
-                Self::parse_subject_public_key_info(pk_content)
+        let public_key_algorithm =
+            if let Some((pk_tag, pk_content, pk_rem)) = Self::read_tlv(tbs_cursor) {
+                tbs_cursor = pk_rem;
+                if pk_tag == 0x30 {
+                    Self::parse_subject_public_key_info(pk_content)
+                } else {
+                    "Unknown".into()
+                }
             } else {
                 "Unknown".into()
-            }
-        } else {
-            "Unknown".into()
-        };
+            };
 
         // Extensions (Optional [3] EXPLICIT Extensions sequence)
         let mut is_ca = false;
@@ -462,18 +488,32 @@ impl X509Parser {
 
     /// Parses a Certificate Signing Request (CSR / PKCS#10, RFC 2986).
     pub fn parse_csr(data: &[u8]) -> Option<X509CsrInfo> {
-        let der = if let Some(d) = Self::extract_pem_with_marker(data, "-----BEGIN CERTIFICATE REQUEST-----", "-----END CERTIFICATE REQUEST-----")
-            .or_else(|| Self::extract_pem_with_marker(data, "-----BEGIN NEW CERTIFICATE REQUEST-----", "-----END NEW CERTIFICATE REQUEST-----")) {
+        let der = if let Some(d) = Self::extract_pem_with_marker(
+            data,
+            "-----BEGIN CERTIFICATE REQUEST-----",
+            "-----END CERTIFICATE REQUEST-----",
+        )
+        .or_else(|| {
+            Self::extract_pem_with_marker(
+                data,
+                "-----BEGIN NEW CERTIFICATE REQUEST-----",
+                "-----END NEW CERTIFICATE REQUEST-----",
+            )
+        }) {
             d
         } else {
             data.to_vec()
         };
 
         let (tag, content, _) = Self::read_tlv(&der)?;
-        if tag != 0x30 { return None; }
+        if tag != 0x30 {
+            return None;
+        }
 
         let (info_tag, info_content, sig_rem) = Self::read_tlv(content)?;
-        if info_tag != 0x30 { return None; }
+        if info_tag != 0x30 {
+            return None;
+        }
 
         let (sig_alg_tag, sig_alg_bytes, _) = Self::read_tlv(sig_rem)?;
         let signature_algorithm = if sig_alg_tag == 0x30 {
@@ -486,18 +526,26 @@ impl X509Parser {
         // Version
         let version = if let Some((0x02, v_bytes, rem)) = Self::read_tlv(cur) {
             cur = rem;
-            format!("v{}", if !v_bytes.is_empty() { v_bytes[0] + 1 } else { 1 })
+            format!(
+                "v{}",
+                if !v_bytes.is_empty() {
+                    v_bytes[0] + 1
+                } else {
+                    1
+                }
+            )
         } else {
             "v1".into()
         };
 
         // Subject
-        let (subject_dn, subject_cn, subject_org, _) = if let Some((0x30, subj_bytes, rem)) = Self::read_tlv(cur) {
-            cur = rem;
-            Self::parse_distinguished_name(subj_bytes)
-        } else {
-            ("Unknown".into(), None, None, None)
-        };
+        let (subject_dn, subject_cn, subject_org, _) =
+            if let Some((0x30, subj_bytes, rem)) = Self::read_tlv(cur) {
+                cur = rem;
+                Self::parse_distinguished_name(subj_bytes)
+            } else {
+                ("Unknown".into(), None, None, None)
+            };
 
         // SubjectPublicKeyInfo
         let public_key_algorithm = if let Some((0x30, spki_bytes, rem)) = Self::read_tlv(cur) {
@@ -534,17 +582,25 @@ impl X509Parser {
 
     /// Parses a Certificate Revocation List (CRL, RFC 5280 Section 5).
     pub fn parse_crl(data: &[u8]) -> Option<X509CrlInfo> {
-        let der = if let Some(d) = Self::extract_pem_with_marker(data, "-----BEGIN X509 CRL-----", "-----END X509 CRL-----") {
+        let der = if let Some(d) = Self::extract_pem_with_marker(
+            data,
+            "-----BEGIN X509 CRL-----",
+            "-----END X509 CRL-----",
+        ) {
             d
         } else {
             data.to_vec()
         };
 
         let (tag, content, _) = Self::read_tlv(&der)?;
-        if tag != 0x30 { return None; }
+        if tag != 0x30 {
+            return None;
+        }
 
         let (tbs_tag, tbs_content, sig_rem) = Self::read_tlv(content)?;
-        if tbs_tag != 0x30 { return None; }
+        if tbs_tag != 0x30 {
+            return None;
+        }
 
         let (sig_alg_tag, sig_alg_bytes, _) = Self::read_tlv(sig_rem)?;
         let signature_algorithm = if sig_alg_tag == 0x30 {
@@ -559,7 +615,14 @@ impl X509Parser {
         let version = if !tbs_cur.is_empty() && tbs_cur[0] == 0x02 {
             if let Some((0x02, v_bytes, rem)) = Self::read_tlv(tbs_cur) {
                 tbs_cur = rem;
-                format!("v{}", if !v_bytes.is_empty() { v_bytes[0] + 1 } else { 1 })
+                format!(
+                    "v{}",
+                    if !v_bytes.is_empty() {
+                        v_bytes[0] + 1
+                    } else {
+                        1
+                    }
+                )
             } else {
                 "v1".into()
             }
@@ -573,12 +636,13 @@ impl X509Parser {
         }
 
         // Issuer
-        let (issuer_dn, issuer_cn, _, _) = if let Some((0x30, iss_bytes, rem)) = Self::read_tlv(tbs_cur) {
-            tbs_cur = rem;
-            Self::parse_distinguished_name(iss_bytes)
-        } else {
-            ("Unknown".into(), None, None, None)
-        };
+        let (issuer_dn, issuer_cn, _, _) =
+            if let Some((0x30, iss_bytes, rem)) = Self::read_tlv(tbs_cur) {
+                tbs_cur = rem;
+                Self::parse_distinguished_name(iss_bytes)
+            } else {
+                ("Unknown".into(), None, None, None)
+            };
 
         // thisUpdate
         let this_update = if let Some((t_tag, t_bytes, rem)) = Self::read_tlv(tbs_cur) {
@@ -689,12 +753,21 @@ impl X509Parser {
         })
     }
 
-    fn extract_pem_with_marker(data: &[u8], start_marker: &str, end_marker: &str) -> Option<Vec<u8>> {
+    fn extract_pem_with_marker(
+        data: &[u8],
+        start_marker: &str,
+        end_marker: &str,
+    ) -> Option<Vec<u8>> {
         let text = std::str::from_utf8(data).ok()?;
         let start_idx = text.find(start_marker)? + start_marker.len();
         let end_idx = text.find(end_marker)?;
-        if start_idx >= end_idx { return None; }
-        let b64_clean: String = text[start_idx..end_idx].chars().filter(|c| !c.is_whitespace()).collect();
+        if start_idx >= end_idx {
+            return None;
+        }
+        let b64_clean: String = text[start_idx..end_idx]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         use base64::Engine;
         base64::prelude::BASE64_STANDARD.decode(b64_clean).ok()
     }
@@ -758,7 +831,11 @@ impl X509Parser {
             }
         }
 
-        parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".")
+        parts
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// Decodes ASN.1 string types including UTF8String, PrintableString, IA5String, BMPString (UTF-16BE), and UniversalString.
@@ -791,7 +868,9 @@ impl X509Parser {
     }
 
     /// Parses Distinguished Name sequence and extracts full DN line and common components.
-    fn parse_distinguished_name(data: &[u8]) -> (String, Option<String>, Option<String>, Option<String>) {
+    fn parse_distinguished_name(
+        data: &[u8],
+    ) -> (String, Option<String>, Option<String>, Option<String>) {
         let mut dn_parts = Vec::new();
         let mut cn = None;
         let mut org = None;
@@ -813,20 +892,28 @@ impl X509Parser {
                                 match oid_str.as_str() {
                                     "2.5.4.3" => {
                                         dn_parts.push(format!("CN={}", val_str));
-                                        if cn.is_none() { cn = Some(val_str.clone()); }
+                                        if cn.is_none() {
+                                            cn = Some(val_str.clone());
+                                        }
                                     }
                                     "2.5.4.10" => {
                                         dn_parts.push(format!("O={}", val_str));
-                                        if org.is_none() { org = Some(val_str.clone()); }
+                                        if org.is_none() {
+                                            org = Some(val_str.clone());
+                                        }
                                     }
                                     "2.5.4.6" => {
                                         dn_parts.push(format!("C={}", val_str));
-                                        if country.is_none() { country = Some(val_str.clone()); }
+                                        if country.is_none() {
+                                            country = Some(val_str.clone());
+                                        }
                                     }
                                     "2.5.4.11" => dn_parts.push(format!("OU={}", val_str)),
                                     "2.5.4.8" => dn_parts.push(format!("ST={}", val_str)),
                                     "2.5.4.7" => dn_parts.push(format!("L={}", val_str)),
-                                    "1.2.840.113549.1.9.1" => dn_parts.push(format!("emailAddress={}", val_str)),
+                                    "1.2.840.113549.1.9.1" => {
+                                        dn_parts.push(format!("emailAddress={}", val_str))
+                                    }
                                     _ => {}
                                 }
                             }
@@ -1013,7 +1100,9 @@ impl X509Parser {
         let na = dates.get(1).cloned();
 
         let status = if let Some(ref not_after_str) = na {
-            if let Ok(exp_time) = chrono::NaiveDateTime::parse_from_str(not_after_str, "%Y-%m-%d %H:%M:%S UTC") {
+            if let Ok(exp_time) =
+                chrono::NaiveDateTime::parse_from_str(not_after_str, "%Y-%m-%d %H:%M:%S UTC")
+            {
                 let now = chrono::Utc::now().naive_utc();
                 if now > exp_time {
                     let diff_days = (now - exp_time).num_days();
@@ -1127,14 +1216,30 @@ impl X509Parser {
                             if let Some((0x03, bit_str, _)) = Self::read_tlv(octet_val) {
                                 if bit_str.len() > 1 {
                                     let b0 = bit_str[1];
-                                    if (b0 & 0x80) != 0 { key_usage.push("Digital Signature".into()); }
-                                    if (b0 & 0x40) != 0 { key_usage.push("Non-Repudiation".into()); }
-                                    if (b0 & 0x20) != 0 { key_usage.push("Key Encipherment".into()); }
-                                    if (b0 & 0x10) != 0 { key_usage.push("Data Encipherment".into()); }
-                                    if (b0 & 0x08) != 0 { key_usage.push("Key Agreement".into()); }
-                                    if (b0 & 0x04) != 0 { key_usage.push("Certificate Sign".into()); }
-                                    if (b0 & 0x02) != 0 { key_usage.push("CRL Sign".into()); }
-                                    if (b0 & 0x01) != 0 { key_usage.push("Encipher Only".into()); }
+                                    if (b0 & 0x80) != 0 {
+                                        key_usage.push("Digital Signature".into());
+                                    }
+                                    if (b0 & 0x40) != 0 {
+                                        key_usage.push("Non-Repudiation".into());
+                                    }
+                                    if (b0 & 0x20) != 0 {
+                                        key_usage.push("Key Encipherment".into());
+                                    }
+                                    if (b0 & 0x10) != 0 {
+                                        key_usage.push("Data Encipherment".into());
+                                    }
+                                    if (b0 & 0x08) != 0 {
+                                        key_usage.push("Key Agreement".into());
+                                    }
+                                    if (b0 & 0x04) != 0 {
+                                        key_usage.push("Certificate Sign".into());
+                                    }
+                                    if (b0 & 0x02) != 0 {
+                                        key_usage.push("CRL Sign".into());
+                                    }
+                                    if (b0 & 0x01) != 0 {
+                                        key_usage.push("Encipher Only".into());
+                                    }
                                     if bit_str.len() > 2 && (bit_str[2] & 0x80) != 0 {
                                         key_usage.push("Decipher Only".into());
                                     }
@@ -1146,7 +1251,8 @@ impl X509Parser {
                         "2.5.29.37" => {
                             if let Some((0x30, eku_seq, _)) = Self::read_tlv(octet_val) {
                                 let mut eku_cur = eku_seq;
-                                while let Some((0x06, eku_oid_bytes, rem)) = Self::read_tlv(eku_cur) {
+                                while let Some((0x06, eku_oid_bytes, rem)) = Self::read_tlv(eku_cur)
+                                {
                                     eku_cur = rem;
                                     let eku_oid = Self::decode_oid(eku_oid_bytes);
                                     let name = match eku_oid.as_str() {
@@ -1175,23 +1281,34 @@ impl X509Parser {
                                         0x82 => {
                                             // dNSName
                                             let s = String::from_utf8_lossy(val).to_string();
-                                            if !s.is_empty() { subject_alt_names.push(format!("DNS:{}", s)); }
+                                            if !s.is_empty() {
+                                                subject_alt_names.push(format!("DNS:{}", s));
+                                            }
                                         }
                                         0x87 => {
                                             // iPAddress
                                             if val.len() == 4 {
-                                                subject_alt_names.push(format!("IP:{}.{}.{}.{}", val[0], val[1], val[2], val[3]));
+                                                subject_alt_names.push(format!(
+                                                    "IP:{}.{}.{}.{}",
+                                                    val[0], val[1], val[2], val[3]
+                                                ));
                                             } else if val.len() == 16 {
                                                 subject_alt_names.push("IPv6-Address".into());
                                             }
                                         }
                                         0x81 => {
                                             // rfc822Name
-                                            subject_alt_names.push(format!("Email:{}", String::from_utf8_lossy(val)));
+                                            subject_alt_names.push(format!(
+                                                "Email:{}",
+                                                String::from_utf8_lossy(val)
+                                            ));
                                         }
                                         0x86 => {
                                             // uniformResourceIdentifier
-                                            subject_alt_names.push(format!("URI:{}", String::from_utf8_lossy(val)));
+                                            subject_alt_names.push(format!(
+                                                "URI:{}",
+                                                String::from_utf8_lossy(val)
+                                            ));
                                         }
                                         _ => {}
                                     }
@@ -1205,10 +1322,13 @@ impl X509Parser {
                                 let mut aia_cur = aia_seq;
                                 while let Some((0x30, desc_seq, rem)) = Self::read_tlv(aia_cur) {
                                     aia_cur = rem;
-                                    if let Some((0x06, method_oid_bytes, loc_rem)) = Self::read_tlv(desc_seq) {
+                                    if let Some((0x06, method_oid_bytes, loc_rem)) =
+                                        Self::read_tlv(desc_seq)
+                                    {
                                         let method = Self::decode_oid(method_oid_bytes);
                                         if let Some((_, uri_val, _)) = Self::read_tlv(loc_rem) {
-                                            let uri_str = String::from_utf8_lossy(uri_val).to_string();
+                                            let uri_str =
+                                                String::from_utf8_lossy(uri_val).to_string();
                                             if method == "1.3.6.1.5.5.7.48.1" {
                                                 ocsp_urls.push(uri_str);
                                             } else if method == "1.3.6.1.5.5.7.48.2" {
@@ -1225,8 +1345,11 @@ impl X509Parser {
                             let text = String::from_utf8_lossy(octet_val);
                             for part in text.split("http") {
                                 if part.starts_with("://") {
-                                    if let Some(end) = part.find(|c: char| c.is_whitespace() || !(' '..='~').contains(&c)) {
-                                        crl_distribution_points.push(format!("http{}", &part[..end]));
+                                    if let Some(end) = part.find(|c: char| {
+                                        c.is_whitespace() || !(' '..='~').contains(&c)
+                                    }) {
+                                        crl_distribution_points
+                                            .push(format!("http{}", &part[..end]));
                                     } else {
                                         crl_distribution_points.push(format!("http{}", part));
                                     }
@@ -1297,19 +1420,21 @@ impl X509Parser {
     #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
         let k: [u32; 64] = [
-            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+            0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+            0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+            0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+            0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+            0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+            0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+            0xc67178f2,
         ];
 
         let mut h: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
         ];
 
         let bit_len = (data.len() as u64) * 8;
@@ -1323,12 +1448,20 @@ impl X509Parser {
         for chunk in msg.chunks_exact(64) {
             let mut w = [0u32; 64];
             for i in 0..16 {
-                w[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+                w[i] = u32::from_be_bytes([
+                    chunk[i * 4],
+                    chunk[i * 4 + 1],
+                    chunk[i * 4 + 2],
+                    chunk[i * 4 + 3],
+                ]);
             }
             for i in 16..64 {
                 let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
                 let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-                w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+                w[i] = w[i - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[i - 7])
+                    .wrapping_add(s1);
             }
 
             let mut a = h[0];
@@ -1343,7 +1476,11 @@ impl X509Parser {
             for i in 0..64 {
                 let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
                 let ch = (e & f) ^ ((!e) & g);
-                let temp1 = h_var.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+                let temp1 = h_var
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(k[i])
+                    .wrapping_add(w[i]);
                 let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
                 let maj = (a & b) ^ (a & c) ^ (b & c);
                 let temp2 = s0.wrapping_add(maj);
@@ -1395,7 +1532,12 @@ impl X509Parser {
         for chunk in msg.chunks_exact(64) {
             let mut w = [0u32; 80];
             for i in 0..16 {
-                w[i] = u32::from_be_bytes([chunk[i * 4], chunk[i * 4 + 1], chunk[i * 4 + 2], chunk[i * 4 + 3]]);
+                w[i] = u32::from_be_bytes([
+                    chunk[i * 4],
+                    chunk[i * 4 + 1],
+                    chunk[i * 4 + 2],
+                    chunk[i * 4 + 3],
+                ]);
             }
             for i in 16..80 {
                 w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -1415,7 +1557,12 @@ impl X509Parser {
                     _ => (b ^ c ^ d, 0xCA62C1D6),
                 };
 
-                let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
+                let temp = a
+                    .rotate_left(5)
+                    .wrapping_add(f)
+                    .wrapping_add(e)
+                    .wrapping_add(k)
+                    .wrapping_add(w[i]);
                 e = d;
                 d = c;
                 c = b.rotate_left(30);
@@ -1455,7 +1602,10 @@ mod tests {
     fn test_sha1_empty_string() {
         let digest = X509Parser::sha1_digest(b"");
         let hex = X509Parser::hex_string(&digest);
-        assert_eq!(hex, "DA:39:A3:EE:5E:6B:4B:0D:32:55:BF:EF:95:60:18:90:AF:D8:07:09");
+        assert_eq!(
+            hex,
+            "DA:39:A3:EE:5E:6B:4B:0D:32:55:BF:EF:95:60:18:90:AF:D8:07:09"
+        );
     }
 
     #[test]
@@ -1470,7 +1620,10 @@ mod tests {
 
         // ML-DSA-65 (Dilithium-3): 2.16.840.1.101.3.4.3.18
         let dilithium_oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12];
-        assert_eq!(X509Parser::decode_oid(&dilithium_oid), "2.16.840.1.101.3.4.3.18");
+        assert_eq!(
+            X509Parser::decode_oid(&dilithium_oid),
+            "2.16.840.1.101.3.4.3.18"
+        );
     }
 
     #[test]

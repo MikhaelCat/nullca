@@ -167,7 +167,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FilterError> {
             }
             c if c.is_alphabetic() || c == '_' => {
                 let mut ident = String::new();
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-') {
+                while i < chars.len()
+                    && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-')
+                {
                     ident.push(chars[i]);
                     i += 1;
                 }
@@ -264,7 +266,9 @@ impl FilterParser {
                         Some(Token::Gt) => CompOp::Gt,
                         Some(Token::Gte) => CompOp::Gte,
                         Some(Token::Contains) => CompOp::Contains,
-                        Some(other) => return Err(FilterError::UnexpectedToken(format!("{:?}", other))),
+                        Some(other) => {
+                            return Err(FilterError::UnexpectedToken(format!("{:?}", other)))
+                        }
                         None => return Err(FilterError::UnexpectedEof),
                     };
 
@@ -272,7 +276,9 @@ impl FilterParser {
                         Some(Token::StringLit(s)) => Value::String(s),
                         Some(Token::Number(n)) => Value::Number(n),
                         Some(Token::Ident(s)) => Value::String(s),
-                        Some(other) => return Err(FilterError::UnexpectedToken(format!("{:?}", other))),
+                        Some(other) => {
+                            return Err(FilterError::UnexpectedToken(format!("{:?}", other)))
+                        }
                         None => return Err(FilterError::UnexpectedEof),
                     };
 
@@ -374,7 +380,10 @@ impl FilterEngine {
             }
             "status" | "code" => {
                 if let Value::Number(n) = val {
-                    if let Some(crate::proto::http1::Http1Message::Response { status_code, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                    if let Some(crate::proto::http1::Http1Message::Response {
+                        status_code, ..
+                    }) = crate::proto::http1::Http1Parser::parse(&event.data)
+                    {
                         return compare_num(status_code as i64, op, *n);
                     }
                     false
@@ -384,7 +393,9 @@ impl FilterEngine {
             }
             "method" => {
                 if let Value::String(s) = val {
-                    if let Some(crate::proto::http1::Http1Message::Request { method, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                    if let Some(crate::proto::http1::Http1Message::Request { method, .. }) =
+                        crate::proto::http1::Http1Parser::parse(&event.data)
+                    {
                         return compare_str(&method, op, s);
                     }
                     false
@@ -394,7 +405,9 @@ impl FilterEngine {
             }
             "path" | "uri" => {
                 if let Value::String(s) = val {
-                    if let Some(crate::proto::http1::Http1Message::Request { uri, .. }) = crate::proto::http1::Http1Parser::parse(&event.data) {
+                    if let Some(crate::proto::http1::Http1Message::Request { uri, .. }) =
+                        crate::proto::http1::Http1Parser::parse(&event.data)
+                    {
                         return compare_str(&uri, op, s);
                     }
                     false
@@ -453,7 +466,8 @@ mod tests {
             3,
             Direction::Ingress,
             "curl".into(),
-            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x01\x01\x05\x00\x00\x00\x01\x82 users".to_vec(),
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x01\x01\x05\x00\x00\x00\x01\x82 users"
+                .to_vec(),
             None,
         );
 

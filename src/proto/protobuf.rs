@@ -128,7 +128,10 @@ impl ProtobufMessage {
                     if len > 1 {
                         if let Ok(nested) = ProtobufMessage::decode(slice) {
                             if !nested.is_empty() {
-                                msg.fields.entry(field_number).or_default().push(ProtobufValue::Message(nested));
+                                msg.fields
+                                    .entry(field_number)
+                                    .or_default()
+                                    .push(ProtobufValue::Message(nested));
                                 continue;
                             }
                         }
@@ -136,7 +139,9 @@ impl ProtobufMessage {
 
                     // 2. Try decoding as UTF-8 string
                     if let Ok(s) = std::str::from_utf8(slice) {
-                        if s.chars().all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t') {
+                        if s.chars()
+                            .all(|c| !c.is_control() || c == '\n' || c == '\r' || c == '\t')
+                        {
                             ProtobufValue::String(s.to_string())
                         } else {
                             ProtobufValue::Bytes(slice.to_vec())
@@ -224,6 +229,9 @@ mod tests {
 
         let msg = ProtobufMessage::decode(&wire).expect("Should decode successfully");
         assert_eq!(msg.fields.get(&1).unwrap()[0], ProtobufValue::Varint(150));
-        assert_eq!(msg.fields.get(&2).unwrap()[0], ProtobufValue::String("testing".into()));
+        assert_eq!(
+            msg.fields.get(&2).unwrap()[0],
+            ProtobufValue::String("testing".into())
+        );
     }
 }

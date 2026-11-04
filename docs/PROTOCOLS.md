@@ -53,6 +53,9 @@ NullCA includes built-in, zero-dependency dissectors for modern web and applicat
   - Opcodes: Continuation (0x0), Text (0x1), Binary (0x2), Close (0x8), Ping (0x9), Pong (0xA).
   - Masking: De-masks 4-byte XOR client keys (`payload[i] ^ mask[i % 4]`).
   - Variable Payload Length: 7-bit, 16-bit (`0x7E`), and 64-bit (`0x7F`) extended lengths.
+- **RFC 7692 Permessage-Deflate Decompression**:
+  - Transparently identifies frames with `RSV1 = 1`.
+  - Appends the standard RFC 7692 synchronization trailer (`0x00, 0x00, 0xFF, 0xFF`) and decompresses raw DEFLATE streams on the fly into plaintext inspectable messages and JSON.
 - **Message Assembly**: Reassembles multi-frame fragmented messages into clean UTF-8 text, binary buffers, or structured JSON.
 
 ---
@@ -76,3 +79,27 @@ NullCA includes built-in, zero-dependency dissectors for modern web and applicat
 - **PostgreSQL**: Startup messages, Query (`Q`), Parse (`P`), Bind (`B`), Execute (`E`), CommandComplete (`C`), ErrorResponse (`E`).
 - **Redis (RESP3 & RESP2)**: Simple strings (`+`), Errors (`-`), Integers (`:`), Bulk strings (`$`), Arrays (`*`), Maps (`%`).
 - **SMTP**: Command inspection (`HELO`, `EHLO`, `MAIL FROM`, `RCPT TO`, `DATA`, `QUIT`).
+
+---
+
+## 7. Stream Decompression Engine (`src/proto/compression.rs`)
+- **Brotli (`br`)**: RFC 7932 Brotli decompression engine enabling transparent inspection of modern web API responses.
+- **Gzip (`gzip`)**: RFC 1952 decompression with CRC32 and ISIZE validation.
+- **Deflate (`deflate`)**: RFC 1950 (Zlib wrapper) and RFC 1951 (raw Deflate) fallback.
+- **Auto-detection**: Content-Encoding header inspection and magic byte sniffing (`1F 8B` for Gzip, `78 9C` for Zlib).
+
+---
+
+## 8. TCP 4-Tuple Socket Resolution (`src/engine/discover.rs`)
+- **Kernel Inode Resolution**: Traces socket file descriptors via `/proc/<pid>/fd/<fd>` symlinks (`socket:[inode]`).
+- **Table Lookup**: Efficiently looks up matching endpoints in `/proc/<pid>/net/tcp` and `/proc/<pid>/net/tcp6`.
+- **Direction-Aware Mapping**: Maps source and destination IPs and ports according to Egress (local -> remote) or Ingress (remote -> local) flow direction.
+- **PCAP-NG Integration**: Emits Wireshark captures with exact real 4-tuple IP addresses instead of dummy loopback endpoints.
+
+---
+
+## 9. Memory-Bounded Stream Reassembler & LRU (`src/proto/reassembler.rs`)
+- **Active Connection Table**: Bounds maximum concurrent stream reassembly to prevent memory exhaustion attacks.
+- **Stale Pruning (`prune_stale`)**: Evicts inactive connection buffers exceeding configurable TTLs.
+- **LRU Fallback**: Evicts oldest connection when reaching table capacity.
+- **Zero-Residual Memory**: Automatically cleans up and frees connection map entries when fragmented messages are fully reassembled and drained.

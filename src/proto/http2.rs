@@ -330,6 +330,60 @@ impl Http2Parser {
 
         frames
     }
+
+    /// Coalesces sequential HEADERS / PUSH_PROMISE and CONTINUATION frames
+    /// into single defragmented HEADERS frames with the END_HEADERS (0x04) flag set.
+    pub fn defragment_continuation_frames(frames: &[Http2Frame]) -> Vec<Http2Frame> {
+        let mut defrag = Vec::new();
+        let mut in_progress_header: Option<Http2Frame> = None;
+
+        for frame in frames {
+            match frame.frame_type {
+                Http2FrameType::Headers | Http2FrameType::PushPromise => {
+                    let end_headers = (frame.flags & 0x04) != 0;
+                    if end_headers {
+                        if let Some(prev) = in_progress_header.take() {
+                            defrag.push(prev);
+                        }
+                        defrag.push(frame.clone());
+                    } else {
+                        if let Some(prev) = in_progress_header.take() {
+                            defrag.push(prev);
+                        }
+                        in_progress_header = Some(frame.clone());
+                    }
+                }
+                Http2FrameType::Continuation => {
+                    if let Some(ref mut cur) = in_progress_header {
+                        if cur.stream_id == frame.stream_id {
+                            cur.payload.extend_from_slice(&frame.payload);
+                            cur.length = cur.payload.len() as u32;
+                            if (frame.flags & 0x04) != 0 {
+                                cur.flags |= 0x04; // Set END_HEADERS
+                                defrag.push(cur.clone());
+                                in_progress_header = None;
+                            }
+                            continue;
+                        }
+                    }
+                    // Standalone continuation or stream mismatch
+                    defrag.push(frame.clone());
+                }
+                _ => {
+                    if let Some(prev) = in_progress_header.take() {
+                        defrag.push(prev);
+                    }
+                    defrag.push(frame.clone());
+                }
+            }
+        }
+
+        if let Some(leftover) = in_progress_header {
+            defrag.push(leftover);
+        }
+
+        defrag
+    }
 }
 
 #[cfg(test)]
@@ -352,8 +406,8 @@ mod tests {
         // Frame: length=5, type=0 (DATA), flags=1 (END_STREAM), stream_id=1, payload="hello"
         let raw = [
             0x00, 0x00, 0x05, // Length: 5
-            0x00,             // Type: DATA
-            0x01,             // Flags: END_STREAM
+            0x00, // Type: DATA
+            0x01, // Flags: END_STREAM
             0x00, 0x00, 0x00, 0x01, // Stream ID: 1
             b'h', b'e', b'l', b'l', b'o',
         ];
@@ -363,5 +417,39 @@ mod tests {
         assert_eq!(frames[0].frame_type, Http2FrameType::Data);
         assert_eq!(frames[0].stream_id, 1);
         assert_eq!(frames[0].payload, b"hello");
+    }
+
+    #[test]
+    fn test_defragment_continuation_frames() {
+        let f1 = Http2Frame {
+            length: 1,
+            frame_type: Http2FrameType::Headers,
+            flags: 0x00, // No END_HEADERS
+            stream_id: 3,
+            payload: vec![0x82], // :method: GET
+        };
+        let f2 = Http2Frame {
+            length: 1,
+            frame_type: Http2FrameType::Continuation,
+            flags: 0x04, // END_HEADERS
+            stream_id: 3,
+            payload: vec![0x84], // :path: /
+        };
+        let f3 = Http2Frame {
+            length: 4,
+            frame_type: Http2FrameType::Data,
+            flags: 0x01,
+            stream_id: 3,
+            payload: b"ping".to_vec(),
+        };
+
+        let raw = vec![f1, f2, f3];
+        let defrag = Http2Parser::defragment_continuation_frames(&raw);
+
+        assert_eq!(defrag.len(), 2);
+        assert_eq!(defrag[0].frame_type, Http2FrameType::Headers);
+        assert_eq!(defrag[0].flags & 0x04, 0x04);
+        assert_eq!(defrag[0].payload, vec![0x82, 0x84]);
+        assert_eq!(defrag[1].frame_type, Http2FrameType::Data);
     }
 }

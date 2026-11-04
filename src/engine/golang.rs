@@ -142,13 +142,22 @@ impl GoSymbolTable {
             let entry_pc = if ptr_size == 8 {
                 u64::from_le_bytes(elf_data[entry_offset..entry_offset + 8].try_into().unwrap())
             } else {
-                u32::from_le_bytes(elf_data[entry_offset..entry_offset + 4].try_into().unwrap()) as u64
+                u32::from_le_bytes(elf_data[entry_offset..entry_offset + 4].try_into().unwrap())
+                    as u64
             };
 
             let foff = if ptr_size == 8 {
-                u64::from_le_bytes(elf_data[entry_offset + 8..entry_offset + 16].try_into().unwrap()) as usize
+                u64::from_le_bytes(
+                    elf_data[entry_offset + 8..entry_offset + 16]
+                        .try_into()
+                        .unwrap(),
+                ) as usize
             } else {
-                u32::from_le_bytes(elf_data[entry_offset + 4..entry_offset + 8].try_into().unwrap()) as usize
+                u32::from_le_bytes(
+                    elf_data[entry_offset + 4..entry_offset + 8]
+                        .try_into()
+                        .unwrap(),
+                ) as usize
             };
 
             let func_info_offset = magic_offset + foff;
@@ -156,7 +165,11 @@ impl GoSymbolTable {
                 continue;
             }
 
-            let name_off = u32::from_le_bytes(elf_data[func_info_offset + 4..func_info_offset + 8].try_into().unwrap()) as usize;
+            let name_off = u32::from_le_bytes(
+                elf_data[func_info_offset + 4..func_info_offset + 8]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
             let full_name_offset = funcname_table + name_off;
 
             if full_name_offset < elf_data.len() {
@@ -230,7 +243,13 @@ pub fn heuristic_disasm_go_prologue(code: &[u8]) -> GoRuntimeOffsets {
     while i < limit {
         // Match FS-relative load for runtime.g (e.g., MOV RAX, FS:[0xfffffff8] or FS:[offset])
         // 64 48 8b 04 25 <4-byte offset>
-        if i + 9 <= limit && code[i] == 0x64 && code[i + 1] == 0x48 && code[i + 2] == 0x8b && code[i + 3] == 0x04 && code[i + 4] == 0x25 {
+        if i + 9 <= limit
+            && code[i] == 0x64
+            && code[i + 1] == 0x48
+            && code[i + 2] == 0x8b
+            && code[i + 3] == 0x04
+            && code[i + 4] == 0x25
+        {
             let offset_bytes: [u8; 4] = code[i + 5..i + 9].try_into().unwrap();
             offsets.g_tls_offset = i32::from_le_bytes(offset_bytes);
             i += 9;
@@ -329,7 +348,8 @@ fn find_pclntab_magic(data: &[u8]) -> Option<usize> {
     // Search for 4-byte magic word
     for i in 0..(data.len() - 4) {
         let val = u32::from_le_bytes(data[i..i + 4].try_into().unwrap());
-        if val == GO_PCLNTAB_MAGIC_120 || val == GO_PCLNTAB_MAGIC_118 || val == GO_PCLNTAB_MAGIC_116 {
+        if val == GO_PCLNTAB_MAGIC_120 || val == GO_PCLNTAB_MAGIC_118 || val == GO_PCLNTAB_MAGIC_116
+        {
             // Verify plausible ptr_size (4 or 8) at offset 7
             if i + 8 <= data.len() && (data[i + 7] == 8 || data[i + 7] == 4) {
                 return Some(i);
@@ -382,9 +402,8 @@ mod tests {
         // 48 8b 58 18                 -> MOV RBX, [RAX + 0x18]
         // 48 8b 4b 30                 -> MOV RCX, [RBX + 0x30]
         let code = [
-            0x64, 0x48, 0x8b, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff,
-            0x48, 0x8b, 0x58, 0x18,
-            0x48, 0x8b, 0x4b, 0x30,
+            0x64, 0x48, 0x8b, 0x04, 0x25, 0xf8, 0xff, 0xff, 0xff, 0x48, 0x8b, 0x58, 0x18, 0x48,
+            0x8b, 0x4b, 0x30,
         ];
 
         let offsets = heuristic_disasm_go_prologue(&code);
@@ -397,10 +416,7 @@ mod tests {
     fn test_heuristic_disasm_arm64() {
         // LDR X1, [X0, #24] (imm12 = 3 * 8 = 24 bytes) -> 0xF9400C01
         // LDR X2, [X1, #48] (imm12 = 6 * 8 = 48 bytes) -> 0xF9401822
-        let arm_code = [
-            0x01, 0x0c, 0x40, 0xf9,
-            0x22, 0x18, 0x40, 0xf9,
-        ];
+        let arm_code = [0x01, 0x0c, 0x40, 0xf9, 0x22, 0x18, 0x40, 0xf9];
 
         let offsets = heuristic_disasm_go_arm64_prologue(&arm_code);
         assert_eq!(offsets.conn_offset, 24);

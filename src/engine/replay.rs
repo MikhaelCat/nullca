@@ -82,7 +82,8 @@ impl ReplayEngine {
         let addr = format!("{}:{}", req.host, req.port);
 
         let t0 = Instant::now();
-        let mut stream = TcpStream::connect(&addr).await
+        let mut stream = TcpStream::connect(&addr)
+            .await
             .map_err(|e| anyhow!("Failed to connect to {}: {}", addr, e))?;
         let connect_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
 

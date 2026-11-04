@@ -41,6 +41,9 @@ fn test_pcapng_export_and_packet_dissection() {
     assert_eq!(&data[0..4], &[0x0A, 0x0D, 0x0D, 0x0A]);
 
     // Verify file contains at least 2 Enhanced Packet Blocks (0x00000006)
-    let epb_count = data.windows(4).filter(|w| *w == [0x06, 0x00, 0x00, 0x00]).count();
+    let epb_count = data
+        .windows(4)
+        .filter(|w| *w == [0x06, 0x00, 0x00, 0x00])
+        .count();
     assert!(epb_count >= 2, "Expected at least 2 EPB blocks");
 }

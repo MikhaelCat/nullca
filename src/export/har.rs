@@ -130,7 +130,10 @@ impl HarExporter {
                     body,
                 }) = Http1Parser::parse(&event.data)
                 {
-                    let host = headers.get("host").cloned().unwrap_or_else(|| "localhost".into());
+                    let host = headers
+                        .get("host")
+                        .cloned()
+                        .unwrap_or_else(|| "localhost".into());
                     let full_url = if uri.starts_with("http") {
                         uri
                     } else {
@@ -179,7 +182,12 @@ impl HarExporter {
                         {
                             (status_code, reason, headers, body)
                         } else {
-                            (200, "OK".into(), std::collections::HashMap::new(), event.data.clone())
+                            (
+                                200,
+                                "OK".into(),
+                                std::collections::HashMap::new(),
+                                event.data.clone(),
+                            )
                         };
 
                     let date = DateTime::<Utc>::from_timestamp(

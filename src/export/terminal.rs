@@ -51,7 +51,13 @@ impl TerminalFormatter {
             ProtocolType::Http1 => {
                 if let Some(msg) = Http1Parser::parse(&event.data) {
                     match msg {
-                        Http1Message::Request { method, uri, version, headers, body } => {
+                        Http1Message::Request {
+                            method,
+                            uri,
+                            version,
+                            headers,
+                            body,
+                        } => {
                             output.push_str(&format!(
                                 "  {} {} {}\n",
                                 method.bold().bright_green(),
@@ -63,10 +69,20 @@ impl TerminalFormatter {
                             }
                             if !body.is_empty() {
                                 let body_preview = String::from_utf8_lossy(&body);
-                                output.push_str(&format!("  [Body: {} bytes]\n  {}\n", body.len(), body_preview.trim()));
+                                output.push_str(&format!(
+                                    "  [Body: {} bytes]\n  {}\n",
+                                    body.len(),
+                                    body_preview.trim()
+                                ));
                             }
                         }
-                        Http1Message::Response { status_code, reason, version, headers, body } => {
+                        Http1Message::Response {
+                            status_code,
+                            reason,
+                            version,
+                            headers,
+                            body,
+                        } => {
                             let status_colored = if status_code < 300 {
                                 status_code.to_string().bold().green()
                             } else if status_code < 400 {
@@ -86,7 +102,11 @@ impl TerminalFormatter {
                             }
                             if !body.is_empty() {
                                 let body_preview = String::from_utf8_lossy(&body);
-                                output.push_str(&format!("  [Body: {} bytes]\n  {}\n", body.len(), body_preview.trim()));
+                                output.push_str(&format!(
+                                    "  [Body: {} bytes]\n  {}\n",
+                                    body.len(),
+                                    body_preview.trim()
+                                ));
                             }
                         }
                     }
@@ -108,7 +128,8 @@ impl TerminalFormatter {
                                 output.push_str(&format!("    {}: {}\n", h.name.cyan(), h.value));
                             }
                         }
-                    } else if frame.frame_type == Http2FrameType::Data && !frame.payload.is_empty() {
+                    } else if frame.frame_type == Http2FrameType::Data && !frame.payload.is_empty()
+                    {
                         let text = String::from_utf8_lossy(&frame.payload);
                         output.push_str(&format!("    [Data]: {}\n", text.trim()));
                     }
@@ -125,7 +146,8 @@ impl TerminalFormatter {
                 }
             }
             ProtocolType::WebSocket => {
-                let frames = crate::proto::websocket::WebSocketParser::parse_all_frames(&event.data);
+                let frames =
+                    crate::proto::websocket::WebSocketParser::parse_all_frames(&event.data);
                 for frame in frames {
                     output.push_str(&format!(
                         "  [WebSocket Frame] Opcode:{} FIN:{} Masked:{} Len:{}\n",
@@ -158,17 +180,27 @@ impl TerminalFormatter {
                 }
             }
             ProtocolType::Redis => {
-                if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&event.data) {
-                    output.push_str(&format!("  [Redis Command] {} {}\n", cmd.command.red().bold(), cmd.args.join(" ").white()));
+                if let Some(cmd) =
+                    crate::proto::database::NonHttpDissector::parse_redis(&event.data)
+                {
+                    output.push_str(&format!(
+                        "  [Redis Command] {} {}\n",
+                        cmd.command.red().bold(),
+                        cmd.args.join(" ").white()
+                    ));
                 }
             }
             ProtocolType::Database => {
-                if let Some(query) = crate::proto::database::NonHttpDissector::parse_postgres(&event.data) {
+                if let Some(query) =
+                    crate::proto::database::NonHttpDissector::parse_postgres(&event.data)
+                {
                     output.push_str(&format!("  [Database SQL Query] {}\n", query.blue().bold()));
                 }
             }
             ProtocolType::Smtp => {
-                if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&event.data) {
+                if let Some(line) =
+                    crate::proto::database::NonHttpDissector::parse_smtp(&event.data)
+                {
                     output.push_str(&format!("  [SMTP Protocol] {}\n", line.yellow()));
                 }
             }
@@ -202,10 +234,19 @@ impl TerminalFormatter {
 
             let ascii_part: String = chunk
                 .iter()
-                .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })
+                .map(|&b| {
+                    if (32..=126).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
 
-            out.push_str(&format!("  {:08x}  {}  |{}|\n", chunk_idx, hex_str, ascii_part));
+            out.push_str(&format!(
+                "  {:08x}  {}  |{}|\n",
+                chunk_idx, hex_str, ascii_part
+            ));
         }
         out
     }

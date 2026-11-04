@@ -23,8 +23,8 @@ use crate::ui::repeater::RepeaterState;
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        MouseButton, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -40,7 +40,10 @@ use ratatui::{
     },
     Terminal,
 };
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -99,6 +102,14 @@ pub struct DashboardState {
     pub command_input: String,
     pub search_mode: bool,
     pub search_input: String,
+
+    // BPF Buffer Drop Counter & Backpressure Alert
+    pub dropped_events: Arc<AtomicU64>,
+
+    // IDOR / BOLA Detection Engine
+    pub idor_detector: crate::engine::idor::IdorDetector,
+    pub pending_http1_requests: HashMap<(u32, i32), (String, Option<String>)>,
+    pub idor_event_indices: HashSet<usize>,
 }
 
 impl Default for DashboardState {
@@ -141,16 +152,57 @@ impl DashboardState {
             command_input: String::new(),
             search_mode: false,
             search_input: String::new(),
+            dropped_events: Arc::new(AtomicU64::new(0)),
+            idor_detector: crate::engine::idor::IdorDetector::new(),
+            pending_http1_requests: HashMap::new(),
+            idor_event_indices: HashSet::new(),
         }
+    }
+
+    pub fn with_dropped_events(mut self, counter: Arc<AtomicU64>) -> Self {
+        self.dropped_events = counter;
+        self
     }
 
     pub fn set_status(&mut self, msg: String) {
         self.status_message = Some((msg, Instant::now()));
     }
 
-    pub fn push_event(&mut self, event: TlsEvent) {
+    pub fn push_event(&mut self, mut event: TlsEvent) {
+        event.resolve_endpoints();
         self.total_bytes += event.data.len();
         let idx = self.events.len();
+
+        // IDOR / BOLA transaction inspection
+        if event.protocol() == ProtocolType::Http1 {
+            if let Some(msg) = Http1Parser::parse(&event.data) {
+                match msg {
+                    Http1Message::Request { headers, uri, .. } => {
+                        let identity =
+                            crate::engine::idor::IdorDetector::extract_identity(&headers);
+                        self.pending_http1_requests
+                            .insert((event.pid, event.fd), (uri, identity));
+                    }
+                    Http1Message::Response { status_code, .. } => {
+                        if let Some((uri, identity)) =
+                            self.pending_http1_requests.remove(&(event.pid, event.fd))
+                        {
+                            let alert_count_before = self.idor_detector.alerts.len();
+                            self.idor_detector.inspect_transaction(
+                                &uri,
+                                identity.as_deref(),
+                                status_code,
+                            );
+                            if self.idor_detector.alerts.len() > alert_count_before {
+                                self.idor_event_indices.insert(idx);
+                                self.set_status(format!("🚨 [CRITICAL IDOR DETECTED] {}", uri));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let satisfies_filter = match &self.filter_engine {
             Some(engine) => engine.matches(&event),
             None => true,
@@ -160,7 +212,8 @@ impl DashboardState {
             self.filtered_indices.push(idx);
             // If at the end and not paused, auto-scroll down
             if !self.paused && self.filtered_indices.len() > 1 {
-                self.table_state.select(Some(self.filtered_indices.len() - 1));
+                self.table_state
+                    .select(Some(self.filtered_indices.len() - 1));
             }
         }
     }
@@ -178,7 +231,10 @@ impl DashboardState {
             Ok(engine) => {
                 self.filter_engine = Some(engine);
                 self.rebuild_filtered();
-                self.set_status(format!("Filter applied: {} matches", self.filtered_indices.len()));
+                self.set_status(format!(
+                    "Filter applied: {} matches",
+                    self.filtered_indices.len()
+                ));
             }
             Err(e) => {
                 self.set_status(format!("Filter error: {}", e));
@@ -284,8 +340,16 @@ impl DashboardState {
 }
 
 pub async fn run_dashboard(
+    event_rx: mpsc::Receiver<TlsEvent>,
+    ipc_server: Option<crate::engine::ipc::IpcServer>,
+) -> io::Result<()> {
+    run_dashboard_with_drops(event_rx, ipc_server, None).await
+}
+
+pub async fn run_dashboard_with_drops(
     mut event_rx: mpsc::Receiver<TlsEvent>,
     ipc_server: Option<crate::engine::ipc::IpcServer>,
+    drop_counter: Option<Arc<AtomicU64>>,
 ) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -294,13 +358,27 @@ pub async fn run_dashboard(
     let mut terminal = Terminal::new(backend)?;
 
     let mut state = DashboardState::new();
+    if let Some(counter) = drop_counter {
+        state = state.with_dropped_events(counter);
+    }
     let tick_rate = Duration::from_millis(50);
 
-    let res = dashboard_loop(&mut terminal, &mut state, &mut event_rx, tick_rate, ipc_server).await;
+    let res = dashboard_loop(
+        &mut terminal,
+        &mut state,
+        &mut event_rx,
+        tick_rate,
+        ipc_server,
+    )
+    .await;
 
     // Restore terminal cleanly
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(err) = res {
@@ -318,7 +396,8 @@ async fn dashboard_loop(
     ipc_server: Option<crate::engine::ipc::IpcServer>,
 ) -> io::Result<()> {
     let (status_tx, mut status_rx) = mpsc::channel::<String>(32);
-    let (replay_res_tx, mut replay_res_rx) = mpsc::channel::<(Result<ReplayResponse, String>, Instant)>(8);
+    let (replay_res_tx, mut replay_res_rx) =
+        mpsc::channel::<(Result<ReplayResponse, String>, Instant)>(8);
 
     loop {
         // Read incoming events from BPF channel
@@ -343,7 +422,8 @@ async fn dashboard_loop(
                         rep.response_status = Some(resp.status_code);
                         rep.response_headers = resp.headers.into_iter().collect();
                         rep.response_body = String::from_utf8_lossy(&resp.body).to_string();
-                        rep.response_metrics = Some((resp.metrics.total_duration_ms, resp.metrics.ttfb_ms));
+                        rep.response_metrics =
+                            Some((resp.metrics.total_duration_ms, resp.metrics.ttfb_ms));
                         rep.response_scroll = 0;
                         rep.error_msg = None;
                     }
@@ -371,7 +451,11 @@ async fn dashboard_loop(
                     // 1. HELP MODAL ACTIVE
                     if state.show_help {
                         match key.code {
-                            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Char('h') | KeyCode::Enter => {
+                            KeyCode::Esc
+                            | KeyCode::Char('q')
+                            | KeyCode::Char('?')
+                            | KeyCode::Char('h')
+                            | KeyCode::Enter => {
                                 state.show_help = false;
                             }
                             _ => {}
@@ -412,7 +496,11 @@ async fn dashboard_loop(
                                 state.export_choice = (state.export_choice + 1) % 5;
                             }
                             KeyCode::Up | KeyCode::Char('k') => {
-                                state.export_choice = if state.export_choice == 0 { 4 } else { state.export_choice - 1 };
+                                state.export_choice = if state.export_choice == 0 {
+                                    4
+                                } else {
+                                    state.export_choice - 1
+                                };
                             }
                             _ => {}
                         }
@@ -431,7 +519,12 @@ async fn dashboard_loop(
                             let s_tx = status_tx.clone();
                             let r_tx = replay_res_tx.clone();
                             tokio::spawn(async move {
-                                let _ = s_tx.send(format!("[REPEATER] Sending {} to {}:{}...", req.method, req.host, req.port)).await;
+                                let _ = s_tx
+                                    .send(format!(
+                                        "[REPEATER] Sending {} to {}:{}...",
+                                        req.method, req.host, req.port
+                                    ))
+                                    .await;
                                 let now = Instant::now();
                                 match ReplayEngine::execute(&req).await {
                                     Ok(resp) => {
@@ -506,7 +599,10 @@ async fn dashboard_loop(
                             KeyCode::Enter => {
                                 state.is_filtering = false;
                                 let trimmed = state.filter_input.trim().to_string();
-                                if !trimmed.is_empty() && state.filter_history.last().map(|s| s.as_str()) != Some(&trimmed) {
+                                if !trimmed.is_empty()
+                                    && state.filter_history.last().map(|s| s.as_str())
+                                        != Some(&trimmed)
+                                {
                                     state.filter_history.push(trimmed);
                                 }
                                 state.filter_history_idx = None;
@@ -519,7 +615,13 @@ async fn dashboard_loop(
                             KeyCode::Up => {
                                 if !state.filter_history.is_empty() {
                                     let next_idx = match state.filter_history_idx {
-                                        Some(i) => if i > 0 { i - 1 } else { 0 },
+                                        Some(i) => {
+                                            if i > 0 {
+                                                i - 1
+                                            } else {
+                                                0
+                                            }
+                                        }
                                         None => state.filter_history.len() - 1,
                                     };
                                     state.filter_history_idx = Some(next_idx);
@@ -590,14 +692,19 @@ async fn dashboard_loop(
                                 state.set_status("Restored 3-pane Cockpit Layout".into());
                             } else {
                                 state.maximized_pane = Some(state.active_pane);
-                                state.set_status(format!("Maximized {:?} Pane (Press 'f' or Esc to exit)", state.active_pane));
+                                state.set_status(format!(
+                                    "Maximized {:?} Pane (Press 'f' or Esc to exit)",
+                                    state.active_pane
+                                ));
                             }
                         }
                         KeyCode::Char('R') | KeyCode::Char('t') => {
                             // Open Interactive Repeater & Tamper Cockpit
                             if let Some(ev) = state.selected_event() {
                                 state.repeater = Some(RepeaterState::from_event(ev));
-                                state.set_status("⚡ Launched Request Repeater & Tamper Cockpit".into());
+                                state.set_status(
+                                    "⚡ Launched Request Repeater & Tamper Cockpit".into(),
+                                );
                             } else {
                                 state.set_status("Select a packet to launch Repeater".into());
                             }
@@ -605,9 +712,14 @@ async fn dashboard_loop(
                         KeyCode::Char('c') => {
                             if let Some(ev) = state.selected_event() {
                                 if let Some(curl_cmd) = CurlExporter::from_payload(&ev.data) {
-                                    state.set_status(format!("cURL: {}", curl_cmd.lines().next().unwrap_or("")));
+                                    state.set_status(format!(
+                                        "cURL: {}",
+                                        curl_cmd.lines().next().unwrap_or("")
+                                    ));
                                 } else {
-                                    state.set_status("Selected packet is not an HTTP request".into());
+                                    state.set_status(
+                                        "Selected packet is not an HTTP request".into(),
+                                    );
                                 }
                             }
                         }
@@ -621,7 +733,11 @@ async fn dashboard_loop(
                                     } else {
                                         state.diff_mode = true;
                                         state.selected_tab = 6; // Switch to Diff tab
-                                        state.set_status(format!("🔍 Comparing Baseline #{} vs #{}", base_idx + 1, curr_idx + 1));
+                                        state.set_status(format!(
+                                            "🔍 Comparing Baseline #{} vs #{}",
+                                            base_idx + 1,
+                                            curr_idx + 1
+                                        ));
                                     }
                                 } else {
                                     state.diff_baseline = Some(curr_idx);
@@ -633,11 +749,25 @@ async fn dashboard_loop(
                             // Fast instant replay of selected HTTP request
                             if let Some(ev) = state.selected_event() {
                                 if let Some(msg) = Http1Parser::parse(&ev.data) {
-                                    if let Http1Message::Request { method, uri, headers, body, .. } = msg {
-                                        let host = headers.get("host").cloned().unwrap_or_else(|| "127.0.0.1".into());
+                                    if let Http1Message::Request {
+                                        method,
+                                        uri,
+                                        headers,
+                                        body,
+                                        ..
+                                    } = msg
+                                    {
+                                        let host = headers
+                                            .get("host")
+                                            .cloned()
+                                            .unwrap_or_else(|| "127.0.0.1".into());
                                         let port = if host.contains(":443") { 443 } else { 80 };
                                         let req = ReplayRequest {
-                                            host: host.split(':').next().unwrap_or("127.0.0.1").to_string(),
+                                            host: host
+                                                .split(':')
+                                                .next()
+                                                .unwrap_or("127.0.0.1")
+                                                .to_string(),
                                             port,
                                             use_tls: port == 443,
                                             method,
@@ -647,18 +777,27 @@ async fn dashboard_loop(
                                         };
                                         let s_tx = status_tx.clone();
                                         tokio::spawn(async move {
-                                            let _ = s_tx.send(format!("[FAST REPLAY] Sending {} to {}:{}...", req.method, req.host, req.port)).await;
+                                            let _ = s_tx
+                                                .send(format!(
+                                                    "[FAST REPLAY] Sending {} to {}:{}...",
+                                                    req.method, req.host, req.port
+                                                ))
+                                                .await;
                                             match ReplayEngine::execute(&req).await {
                                                 Ok(resp) => {
                                                     let _ = s_tx.send(format!("[FAST REPLAY OK] Status: {} (Latency: {:.1}ms, TTFB: {:.1}ms)", resp.status_code, resp.metrics.total_duration_ms, resp.metrics.ttfb_ms)).await;
                                                 }
                                                 Err(e) => {
-                                                    let _ = s_tx.send(format!("[FAST REPLAY ERROR] {}", e)).await;
+                                                    let _ = s_tx
+                                                        .send(format!("[FAST REPLAY ERROR] {}", e))
+                                                        .await;
                                                 }
                                             }
                                         });
                                     } else {
-                                        state.set_status("Can only replay HTTP Request packets".into());
+                                        state.set_status(
+                                            "Can only replay HTTP Request packets".into(),
+                                        );
                                     }
                                 } else {
                                     state.set_status("Selected packet is not HTTP/1.1 Request (Press 'R' for full Repeater)".into());
@@ -752,7 +891,9 @@ async fn dashboard_loop(
                         KeyCode::End | KeyCode::Char('G') => match state.active_pane {
                             ActivePane::PacketTable => {
                                 if !state.filtered_indices.is_empty() {
-                                    state.table_state.select(Some(state.filtered_indices.len() - 1));
+                                    state
+                                        .table_state
+                                        .select(Some(state.filtered_indices.len() - 1));
                                     state.details_scroll = 0;
                                     state.hex_scroll = 0;
                                 }
@@ -782,7 +923,11 @@ async fn dashboard_loop(
     Ok(())
 }
 
-fn handle_mouse_event(state: &mut DashboardState, mouse: crossterm::event::MouseEvent, size: ratatui::layout::Size) {
+fn handle_mouse_event(
+    state: &mut DashboardState,
+    mouse: crossterm::event::MouseEvent,
+    size: ratatui::layout::Size,
+) {
     match mouse.kind {
         MouseEventKind::ScrollDown => match state.active_pane {
             ActivePane::PacketTable => state.next_packet(),
@@ -841,7 +986,11 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
                 let idx = state.selected_event_idx().unwrap_or(0);
                 let path = format!("nullca_payload_{}.bin", idx + 1);
                 if std::fs::write(&path, &ev.data).is_ok() {
-                    state.set_status(format!("Saved {} bytes raw payload to '{}'", ev.data.len(), path));
+                    state.set_status(format!(
+                        "Saved {} bytes raw payload to '{}'",
+                        ev.data.len(),
+                        path
+                    ));
                 } else {
                     state.set_status("Failed to write payload file".into());
                 }
@@ -855,7 +1004,10 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
                 let idx = state.selected_event_idx().unwrap_or(0);
                 if let Some(curl_cmd) = CurlExporter::from_payload(&ev.data) {
                     let path = format!("nullca_request_{}.sh", idx + 1);
-                    let script = format!("#!/usr/bin/env bash\n# NullCA Exported cURL Request #\n\n{}\n", curl_cmd);
+                    let script = format!(
+                        "#!/usr/bin/env bash\n# NullCA Exported cURL Request #\n\n{}\n",
+                        curl_cmd
+                    );
                     if std::fs::write(&path, script).is_ok() {
                         state.set_status(format!("Saved ready-to-run cURL script to '{}'", path));
                     } else {
@@ -872,7 +1024,11 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
             // Export PCAP-NG
             let path = "nullca_capture.pcapng";
             if PcapNgWriter::write_to_file(&state.events, path).is_ok() {
-                state.set_status(format!("Exported {} packets to Wireshark PCAP-NG '{}'", state.events.len(), path));
+                state.set_status(format!(
+                    "Exported {} packets to Wireshark PCAP-NG '{}'",
+                    state.events.len(),
+                    path
+                ));
             } else {
                 state.set_status("Failed to export PCAP-NG file".into());
             }
@@ -881,7 +1037,11 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
             // Export HAR
             let path = "nullca_capture.har";
             if HarExporter::write_to_file(&state.events, path).is_ok() {
-                state.set_status(format!("Exported {} packets to HAR 1.2 '{}'", state.events.len(), path));
+                state.set_status(format!(
+                    "Exported {} packets to HAR 1.2 '{}'",
+                    state.events.len(),
+                    path
+                ));
             } else {
                 state.set_status("Failed to export HAR file".into());
             }
@@ -891,7 +1051,8 @@ fn execute_export(state: &mut DashboardState, choice: usize) {
             let path = "nullca_openapi.json";
             let har = HarExporter::export_events(&state.events);
             let gen = crate::export::openapi::OpenApiGenerator::new();
-            let spec = gen.generate_from_har_entries(&har.log.entries, "NullCA Intercepted API", "1.0.0");
+            let spec =
+                gen.generate_from_har_entries(&har.log.entries, "NullCA Intercepted API", "1.0.0");
             match gen.to_json_string(&spec) {
                 Ok(json_str) => {
                     if std::fs::write(path, json_str).is_ok() {
@@ -957,7 +1118,11 @@ fn execute_vim_command(state: &mut DashboardState, cmd: &str) -> bool {
                     "openapi" => {
                         let har = HarExporter::export_events(&state.events);
                         let gen = crate::export::openapi::OpenApiGenerator::new();
-                        let spec = gen.generate_from_har_entries(&har.log.entries, "NullCA Export", "1.0.0");
+                        let spec = gen.generate_from_har_entries(
+                            &har.log.entries,
+                            "NullCA Export",
+                            "1.0.0",
+                        );
                         if let Ok(j) = gen.to_json_string(&spec) {
                             let _ = std::fs::write(path, j);
                             state.set_status(format!("Exported OpenAPI 3.0 to '{}'", path));
@@ -987,7 +1152,10 @@ fn execute_vim_command(state: &mut DashboardState, cmd: &str) -> bool {
             state.show_help = true;
         }
         _ => {
-            state.set_status(format!("Unknown command ':{}'. Type ':help' for commands", parts[0]));
+            state.set_status(format!(
+                "Unknown command ':{}'. Type ':help' for commands",
+                parts[0]
+            ));
         }
     }
 
@@ -1023,7 +1191,11 @@ fn execute_search_query(state: &mut DashboardState, query: &str) {
         state.table_state.select(Some(row));
         state.details_scroll = 0;
         state.hex_scroll = 0;
-        state.set_status(format!("Found match for '{}' at packet #{}", query, row + 1));
+        state.set_status(format!(
+            "Found match for '{}' at packet #{}",
+            query,
+            row + 1
+        ));
     } else {
         state.set_status(format!("No matches found for '{}'", query));
     }
@@ -1054,11 +1226,11 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut DashboardState) {
         let chunks = Layout::default()
             .direction(LayoutDirection::Vertical)
             .constraints([
-                Constraint::Length(3), // Header & stats
-                Constraint::Length(3), // Filter bar
+                Constraint::Length(3),      // Header & stats
+                Constraint::Length(3),      // Filter bar
                 Constraint::Percentage(50), // Packet Table
                 Constraint::Percentage(40), // Details & Hex view
-                Constraint::Length(1), // Footer hotkeys
+                Constraint::Length(1),      // Footer hotkeys
             ])
             .split(size);
 
@@ -1088,43 +1260,109 @@ fn draw_header(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
     };
 
     let status_pill = if state.paused {
-        Span::styled(" [PAUSED] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        Span::styled(
+            " [PAUSED] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        Span::styled(" [LIVE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        Span::styled(
+            " [LIVE] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
     };
 
     let diff_pill = if let Some(base) = state.diff_baseline {
-        Span::styled(format!(" [BASE: #{}] ", base + 1), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Span::styled(
+            format!(" [BASE: #{}] ", base + 1),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::raw("")
     };
 
     let fullscreen_pill = if let Some(pane) = state.maximized_pane {
-        Span::styled(format!(" [FULLSCREEN: {:?}] ", pane), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+        Span::styled(
+            format!(" [FULLSCREEN: {:?}] ", pane),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("")
+    };
+
+    let drops = state.dropped_events.load(Ordering::Relaxed);
+    let drops_pill = if drops > 0 {
+        Span::styled(
+            format!(" [⚠ DROPS: {}] ", drops),
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("")
+    };
+
+    let idor_pill = if !state.idor_detector.alerts.is_empty() {
+        Span::styled(
+            format!(" [🚨 IDOR: {}] ", state.idor_detector.alerts.len()),
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
         Span::raw("")
     };
 
     let title_line = Line::from(vec![
-        Span::styled("⚡ NullCA Cockpit v0.2.0 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "⚡ NullCA Cockpit v0.2.0 ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("─ Zero-CA eBPF Plaintext TLS, HTTP/2, WS & gRPC Inspector "),
         status_pill,
         diff_pill,
         fullscreen_pill,
+        drops_pill,
+        idor_pill,
     ]);
 
     let stats_line = Line::from(vec![
         Span::styled("Packets: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}", state.events.len()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{}", state.events.len()),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" | "),
         Span::styled("Filtered: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{}", state.filtered_indices.len()), Style::default().fg(Color::LightCyan)),
+        Span::styled(
+            format!("{}", state.filtered_indices.len()),
+            Style::default().fg(Color::LightCyan),
+        ),
         Span::raw(" | "),
         Span::styled("Throughput: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{} KB/s", speed_kb), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("{} KB/s", speed_kb),
+            Style::default().fg(Color::Yellow),
+        ),
         Span::raw(" | "),
         Span::styled("Total: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{:.2} MB", state.total_bytes as f64 / 1_048_576.0), Style::default().fg(Color::LightGreen)),
+        Span::styled(
+            format!("{:.2} MB", state.total_bytes as f64 / 1_048_576.0),
+            Style::default().fg(Color::LightGreen),
+        ),
     ]);
 
     let block = Block::default()
@@ -1161,11 +1399,14 @@ fn draw_filter_bar(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
     } else if let Some(ref _engine) = state.filter_engine {
         state.filter_input.clone()
     } else {
-        "No filter active (try: proto == \"http2\" || status >= 400 || contains \"flag{\")".to_string()
+        "No filter active (try: proto == \"http2\" || status >= 400 || contains \"flag{\")"
+            .to_string()
     };
 
     let style = if state.is_filtering {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
     } else if state.filter_engine.is_some() {
         Style::default().fg(Color::Green)
     } else {
@@ -1178,16 +1419,35 @@ fn draw_filter_bar(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
 
 fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: Rect) {
     let is_focused = state.active_pane == ActivePane::PacketTable;
-    let border_color = if is_focused { Color::Cyan } else { Color::DarkGray };
+    let border_color = if is_focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Captured Decrypted Packets [Tab to focus, j/k or wheel to scroll] ")
         .border_style(Style::default().fg(border_color));
 
-    let header_cells = ["#", "DIR", "PROTO", "PROCESS", "PID", "SIZE", "SECURITY", "PAYLOAD PREVIEW"]
-        .iter()
-        .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    let header_cells = [
+        "#",
+        "DIR",
+        "PROTO",
+        "PROCESS",
+        "PID",
+        "SIZE",
+        "SECURITY",
+        "PAYLOAD PREVIEW",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header = Row::new(header_cells).height(1).bottom_margin(0);
 
     let rows: Vec<Row> = state
@@ -1217,9 +1477,17 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                 ProtocolType::RawTls => ("TLS/RAW", Style::default().fg(Color::DarkGray)),
             };
 
-            // Scan secrets & flags
+            // Scan secrets, flags & IDOR alerts
+            let has_idor = state.idor_event_indices.contains(idx);
             let detected = scan_secrets(&ev.data);
-            let secret_badge = if !detected.is_empty() {
+            let secret_badge = if has_idor {
+                Cell::from(" [IDOR!] ").style(
+                    Style::default()
+                        .bg(Color::Red)
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else if !detected.is_empty() {
                 let label = match detected[0].kind {
                     crate::proto::secrets::SecretKind::JwtToken => "[JWT]",
                     crate::proto::secrets::SecretKind::CtfFlag => "[FLAG]",
@@ -1228,7 +1496,8 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                     crate::proto::secrets::SecretKind::GitHubToken => "[GH-PAT]",
                     _ => "[SECRET]",
                 };
-                Cell::from(label).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                Cell::from(label)
+                    .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
             } else {
                 Cell::from("-").style(Style::default().fg(Color::DarkGray))
             };
@@ -1237,48 +1506,78 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             let preview = match ev.protocol() {
                 ProtocolType::WebSocket => {
                     if let Some((frame, _)) = WebSocketParser::parse_frame(&ev.data) {
-                        format!("[{}] {}", frame.opcode, frame.text_preview.unwrap_or_else(|| format!("{} bytes", frame.payload_len)))
+                        format!(
+                            "[{}] {}",
+                            frame.opcode,
+                            frame
+                                .text_preview
+                                .unwrap_or_else(|| format!("{} bytes", frame.payload_len))
+                        )
                     } else {
-                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                        String::from_utf8_lossy(&ev.data)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
                     }
                 }
                 ProtocolType::X509 => {
                     if let Some(cert) = X509Parser::parse(&ev.data) {
-                        format!("CN={} (Issuer: {})", cert.subject_cn.as_deref().unwrap_or("Unknown"), cert.issuer_cn.as_deref().unwrap_or("Unknown"))
+                        format!(
+                            "CN={} (Issuer: {})",
+                            cert.subject_cn.as_deref().unwrap_or("Unknown"),
+                            cert.issuer_cn.as_deref().unwrap_or("Unknown")
+                        )
                     } else {
                         "X.509 Certificate Chain / Bundle".into()
                     }
                 }
                 ProtocolType::Redis => {
-                    if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&ev.data) {
+                    if let Some(cmd) =
+                        crate::proto::database::NonHttpDissector::parse_redis(&ev.data)
+                    {
                         format!("{} {}", cmd.command, cmd.args.join(" "))
                     } else {
-                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                        String::from_utf8_lossy(&ev.data)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
                     }
                 }
                 ProtocolType::Database => {
-                    if let Some(q) = crate::proto::database::NonHttpDissector::parse_postgres(&ev.data) {
+                    if let Some(q) =
+                        crate::proto::database::NonHttpDissector::parse_postgres(&ev.data)
+                    {
                         q
                     } else {
-                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                        String::from_utf8_lossy(&ev.data)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
                     }
                 }
                 ProtocolType::Smtp => {
-                    if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&ev.data) {
+                    if let Some(line) =
+                        crate::proto::database::NonHttpDissector::parse_smtp(&ev.data)
+                    {
                         line
                     } else {
-                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                        String::from_utf8_lossy(&ev.data)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
                     }
                 }
-                _ => {
-                    String::from_utf8_lossy(&ev.data)
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(65)
-                        .collect::<String>()
-                }
+                _ => String::from_utf8_lossy(&ev.data)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(65)
+                    .collect::<String>(),
             };
 
             let id_label = if state.diff_baseline == Some(*idx) {
@@ -1347,7 +1646,11 @@ fn draw_fullscreen_hexdump(f: &mut ratatui::Frame, state: &mut DashboardState, a
 fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: Rect) {
     let maybe_event = state.selected_event();
     let is_focused = state.active_pane == ActivePane::DecodedDetails;
-    let left_border = if is_focused { Color::Cyan } else { Color::DarkGray };
+    let left_border = if is_focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let tab_titles = [
         " [1] Info & Headers ",
@@ -1362,7 +1665,12 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
     .enumerate()
     .map(|(i, &title)| {
         if i == state.selected_tab {
-            Span::styled(title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled(title, Style::default().fg(Color::DarkGray))
         }
@@ -1380,18 +1688,55 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 
         lines.push(Line::from(vec![
             Span::styled("Process: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{} (PID: {})", ev.comm, ev.pid), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} (PID: {})", ev.comm, ev.pid),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Socket FD: ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{}", ev.fd), Style::default().fg(Color::LightBlue)),
             Span::styled("  Direction: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:?}", ev.direction), Style::default().fg(if ev.direction == Direction::Ingress { Color::Green } else { Color::Blue })),
+            Span::styled(
+                format!("{:?}", ev.direction),
+                Style::default().fg(if ev.direction == Direction::Ingress {
+                    Color::Green
+                } else {
+                    Color::Blue
+                }),
+            ),
         ]));
+
+        if let (Some(src), Some(sp), Some(dst), Some(dp)) =
+            (&ev.src_addr, ev.src_port, &ev.dst_addr, ev.dst_port)
+        {
+            lines.push(Line::from(vec![
+                Span::styled("Endpoint: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}:{}", src, sp),
+                    Style::default().fg(Color::LightCyan),
+                ),
+                Span::styled(" ➔ ", Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("{}:{}", dst, dp),
+                    Style::default().fg(Color::LightCyan),
+                ),
+            ]));
+        }
 
         lines.push(Line::from(vec![
             Span::styled("Protocol: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:?}", ev.protocol()), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:?}", ev.protocol()),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("  Payload Size: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{} bytes", ev.data.len()), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{} bytes", ev.data.len()),
+                Style::default().fg(Color::Yellow),
+            ),
         ]));
 
         lines.push(Line::raw(""));
@@ -1402,33 +1747,78 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                 match ev.protocol() {
                     ProtocolType::Http1 => {
                         if let Some(msg) = Http1Parser::parse(&ev.data) {
-                            lines.push(Line::from(Span::styled("--- HTTP/1.1 Header Dissection ---", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                            lines.push(Line::from(Span::styled(
+                                "--- HTTP/1.1 Header Dissection ---",
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
                             let (headers, body) = match msg {
-                                Http1Message::Request { headers, body, method, uri, version } => {
+                                Http1Message::Request {
+                                    headers,
+                                    body,
+                                    method,
+                                    uri,
+                                    version,
+                                } => {
                                     lines.push(Line::from(vec![
-                                        Span::styled("Request: ", Style::default().fg(Color::DarkGray)),
-                                        Span::styled(format!("{} {} {}", method, uri, version), Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                                        Span::styled(
+                                            "Request: ",
+                                            Style::default().fg(Color::DarkGray),
+                                        ),
+                                        Span::styled(
+                                            format!("{} {} {}", method, uri, version),
+                                            Style::default()
+                                                .fg(Color::LightGreen)
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
                                     ]));
                                     (headers, body)
                                 }
-                                Http1Message::Response { headers, body, status_code, reason, version } => {
-                                    let status_color = if status_code < 300 { Color::Green } else if status_code < 400 { Color::Cyan } else { Color::Red };
+                                Http1Message::Response {
+                                    headers,
+                                    body,
+                                    status_code,
+                                    reason,
+                                    version,
+                                } => {
+                                    let status_color = if status_code < 300 {
+                                        Color::Green
+                                    } else if status_code < 400 {
+                                        Color::Cyan
+                                    } else {
+                                        Color::Red
+                                    };
                                     lines.push(Line::from(vec![
-                                        Span::styled("Response: ", Style::default().fg(Color::DarkGray)),
-                                        Span::styled(format!("{} {} {}", version, status_code, reason), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                                        Span::styled(
+                                            "Response: ",
+                                            Style::default().fg(Color::DarkGray),
+                                        ),
+                                        Span::styled(
+                                            format!("{} {} {}", version, status_code, reason),
+                                            Style::default()
+                                                .fg(status_color)
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
                                     ]));
                                     (headers, body)
                                 }
                             };
                             for (k, v) in headers {
                                 lines.push(Line::from(vec![
-                                    Span::styled(format!("  {}: ", k), Style::default().fg(Color::LightCyan)),
+                                    Span::styled(
+                                        format!("  {}: ", k),
+                                        Style::default().fg(Color::LightCyan),
+                                    ),
                                     Span::raw(v),
                                 ]));
                             }
                             if !body.is_empty() {
                                 lines.push(Line::raw(""));
-                                lines.push(Line::from(Span::styled(format!("--- Body ({} bytes) ---", body.len()), Style::default().fg(Color::Cyan))));
+                                lines.push(Line::from(Span::styled(
+                                    format!("--- Body ({} bytes) ---", body.len()),
+                                    Style::default().fg(Color::Cyan),
+                                )));
                                 for l in String::from_utf8_lossy(&body).lines() {
                                     lines.push(Line::raw(l.to_string()));
                                 }
@@ -1436,20 +1826,42 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                         }
                     }
                     ProtocolType::Database => {
-                        if let Some(q) = crate::proto::database::NonHttpDissector::parse_postgres(&ev.data) {
-                            lines.push(Line::from(Span::styled("--- Database SQL Query Dissection ---", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD))));
+                        if let Some(q) =
+                            crate::proto::database::NonHttpDissector::parse_postgres(&ev.data)
+                        {
+                            lines.push(Line::from(Span::styled(
+                                "--- Database SQL Query Dissection ---",
+                                Style::default()
+                                    .fg(Color::LightBlue)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
                             lines.push(Line::raw(""));
                             for l in q.lines() {
-                                lines.push(Line::from(Span::styled(l.to_string(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+                                lines.push(Line::from(Span::styled(
+                                    l.to_string(),
+                                    Style::default()
+                                        .fg(Color::White)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
                             }
                         }
                     }
                     ProtocolType::Redis => {
-                        if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&ev.data) {
-                            lines.push(Line::from(Span::styled("--- Redis Protocol (RESP) Dissection ---", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))));
+                        if let Some(cmd) =
+                            crate::proto::database::NonHttpDissector::parse_redis(&ev.data)
+                        {
+                            lines.push(Line::from(Span::styled(
+                                "--- Redis Protocol (RESP) Dissection ---",
+                                Style::default()
+                                    .fg(Color::LightRed)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
                             lines.push(Line::from(vec![
                                 Span::styled("Command: ", Style::default().fg(Color::DarkGray)),
-                                Span::styled(cmd.command, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                                Span::styled(
+                                    cmd.command,
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                ),
                             ]));
                             lines.push(Line::from(format!("Arguments ({}):", cmd.args.len())));
                             for (i, arg) in cmd.args.iter().enumerate() {
@@ -1458,13 +1870,26 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                         }
                     }
                     ProtocolType::Smtp => {
-                        if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&ev.data) {
-                            lines.push(Line::from(Span::styled("--- SMTP Mail Protocol Dissection ---", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD))));
-                            lines.push(Line::from(Span::styled(line, Style::default().fg(Color::White))));
+                        if let Some(line) =
+                            crate::proto::database::NonHttpDissector::parse_smtp(&ev.data)
+                        {
+                            lines.push(Line::from(Span::styled(
+                                "--- SMTP Mail Protocol Dissection ---",
+                                Style::default()
+                                    .fg(Color::LightYellow)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                            lines.push(Line::from(Span::styled(
+                                line,
+                                Style::default().fg(Color::White),
+                            )));
                         }
                     }
                     _ => {
-                        lines.push(Line::from(Span::styled("--- Decoded Payload Stream ---", Style::default().fg(Color::DarkGray))));
+                        lines.push(Line::from(Span::styled(
+                            "--- Decoded Payload Stream ---",
+                            Style::default().fg(Color::DarkGray),
+                        )));
                         let text = String::from_utf8_lossy(&ev.data);
                         for l in text.lines() {
                             lines.push(Line::raw(format!("  {}", l)));
@@ -1476,41 +1901,126 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                 // Protobuf Tree
                 if let Ok((grpc_msg, _)) = GrpcMessage::parse(&ev.data) {
                     if let Ok(pb) = ProtobufMessage::decode(&grpc_msg.payload) {
-                        lines.push(Line::from(Span::styled("--- gRPC & Schema-less Protobuf Tree ---", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+                        lines.push(Line::from(Span::styled(
+                            "--- gRPC & Schema-less Protobuf Tree ---",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )));
                         for line in pb.to_json().lines() {
                             lines.push(Line::raw(format!("  {}", line)));
                         }
                     }
                 } else if let Ok(pb) = ProtobufMessage::decode(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- Schema-less Protobuf Wire Tree ---", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- Schema-less Protobuf Wire Tree ---",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     for line in pb.to_json().lines() {
                         lines.push(Line::raw(format!("  {}", line)));
                     }
                 } else {
-                    lines.push(Line::raw("No Protocol Buffers binary wire payload detected."));
+                    lines.push(Line::raw(
+                        "No Protocol Buffers binary wire payload detected.",
+                    ));
                 }
             }
             2 => {
-                // Secrets & CTF Flags
+                // Secrets, CTF Flags & IDOR Alerts
+                if !state.idor_detector.alerts.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "🚨 Active IDOR / BOLA Vulnerability Alerts ({}):",
+                            state.idor_detector.alerts.len()
+                        ),
+                        Style::default()
+                            .bg(Color::Red)
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::raw(""));
+                    for alert in &state.idor_detector.alerts {
+                        lines.push(Line::from(vec![
+                            Span::styled("Severity: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                alert.severity,
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" | Template: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                &alert.endpoint_template,
+                                Style::default().fg(Color::LightCyan),
+                            ),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled("Resource ID: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                &alert.target_resource_id,
+                                Style::default().fg(Color::Yellow),
+                            ),
+                            Span::styled(" | Owner: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                &alert.original_identity,
+                                Style::default().fg(Color::Green),
+                            ),
+                            Span::styled(" ➔ Accessed by: ", Style::default().fg(Color::Red)),
+                            Span::styled(
+                                &alert.accessing_identity,
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                        lines.push(Line::raw(""));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "─".repeat(50),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
                 let secrets = scan_secrets(&ev.data);
                 if secrets.is_empty() {
-                    lines.push(Line::raw("No sensitive tokens, JWTs, or CTF flags detected in payload."));
+                    if state.idor_detector.alerts.is_empty() {
+                        lines.push(Line::raw(
+                            "No sensitive tokens, JWTs, or CTF flags detected in payload.",
+                        ));
+                    }
                 } else {
-                    lines.push(Line::from(Span::styled(format!("Detected {} sensitive token(s) / flag(s):", secrets.len()), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        format!("Detected {} sensitive token(s) / flag(s):", secrets.len()),
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::raw(""));
                     for sec in secrets {
                         lines.push(Line::from(vec![
                             Span::styled("Type: ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(format!("{:?}", sec.kind), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!(" ({})", sec.location), Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("{:?}", sec.kind),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!(" ({})", sec.location),
+                                Style::default().fg(Color::DarkGray),
+                            ),
                         ]));
                         lines.push(Line::from(vec![
                             Span::styled("Token: ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(sec.raw_token, Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                sec.raw_token,
+                                Style::default()
+                                    .fg(Color::LightGreen)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                         ]));
                         if let Some(details) = sec.decoded_details {
                             for l in details.lines() {
-                                lines.push(Line::from(Span::styled(format!("  {}", l), Style::default().fg(Color::LightCyan))));
+                                lines.push(Line::from(Span::styled(
+                                    format!("  {}", l),
+                                    Style::default().fg(Color::LightCyan),
+                                )));
                             }
                         }
                         lines.push(Line::raw(""));
@@ -1520,35 +2030,76 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             3 => {
                 // cURL
                 if let Some(curl_cmd) = CurlExporter::from_payload(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- Ready-to-Run cURL Command ---", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- Ready-to-Run cURL Command ---",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::raw(""));
                     for l in curl_cmd.lines() {
                         lines.push(Line::raw(l.to_string()));
                     }
                 } else {
-                    lines.push(Line::raw("Not an outbound HTTP request (cURL export available for requests only)."));
+                    lines.push(Line::raw(
+                        "Not an outbound HTTP request (cURL export available for requests only).",
+                    ));
                 }
             }
             4 => {
                 // WebSocket
                 let frames = WebSocketParser::parse_all_frames(&ev.data);
                 if frames.is_empty() {
-                    lines.push(Line::raw("No RFC 6455 WebSocket frames detected in this packet."));
+                    lines.push(Line::raw(
+                        "No RFC 6455 WebSocket frames detected in this packet.",
+                    ));
                 } else {
-                    lines.push(Line::from(Span::styled(format!("--- WebSocket Stream Dissection ({} frames) ---", frames.len()), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "--- WebSocket Stream Dissection ({} frames) ---",
+                            frames.len()
+                        ),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::raw(""));
                     for (i, f) in frames.iter().enumerate() {
                         lines.push(Line::from(vec![
-                            Span::styled(format!("[Frame #{}] ", i + 1), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                            Span::styled(format!("Opcode: {} ", f.opcode), Style::default().fg(Color::LightCyan)),
-                            Span::styled(format!("FIN: {} ", f.fin), Style::default().fg(if f.fin { Color::Green } else { Color::Yellow })),
-                            Span::styled(format!("Masked: {} ", f.masked), Style::default().fg(Color::DarkGray)),
-                            Span::styled(format!("Len: {} bytes", f.payload_len), Style::default().fg(Color::White)),
+                            Span::styled(
+                                format!("[Frame #{}] ", i + 1),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("Opcode: {} ", f.opcode),
+                                Style::default().fg(Color::LightCyan),
+                            ),
+                            Span::styled(
+                                format!("FIN: {} ", f.fin),
+                                Style::default().fg(if f.fin {
+                                    Color::Green
+                                } else {
+                                    Color::Yellow
+                                }),
+                            ),
+                            Span::styled(
+                                format!("Masked: {} ", f.masked),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                            Span::styled(
+                                format!("Len: {} bytes", f.payload_len),
+                                Style::default().fg(Color::White),
+                            ),
                         ]));
                         if let Some(ref text) = f.text_preview {
                             let tag = if f.is_json { "[JSON]" } else { "[TEXT]" };
                             lines.push(Line::from(vec![
-                                Span::styled(format!("  {} Payload: ", tag), Style::default().fg(Color::LightGreen)),
+                                Span::styled(
+                                    format!("  {} Payload: ", tag),
+                                    Style::default().fg(Color::LightGreen),
+                                ),
                                 Span::raw(text.clone()),
                             ]));
                         }
@@ -1559,43 +2110,94 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             5 => {
                 // X.509 PKI & Certificate Inspector
                 if let Some(cert) = X509Parser::parse(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- X.509 Public Key Infrastructure Dissection ---", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- X.509 Public Key Infrastructure Dissection ---",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::from(vec![
                         Span::styled("  Subject DN: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(cert.subject_dn, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            cert.subject_dn,
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                     ]));
                     lines.push(Line::from(vec![
                         Span::styled("  Issuer DN: ", Style::default().fg(Color::DarkGray)),
                         Span::styled(cert.issuer_dn, Style::default().fg(Color::Yellow)),
                     ]));
-                    lines.push(Line::from(format!("  Public Key: {} | Signature: {}", cert.public_key_algorithm, cert.signature_algorithm)));
-                    lines.push(Line::from(format!("  Validity: {} -> {}", cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"))));
-                    let status_style = if cert.validity_status.starts_with("EXPIRED") { Style::default().fg(Color::Red).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Green).add_modifier(Modifier::BOLD) };
+                    lines.push(Line::from(format!(
+                        "  Public Key: {} | Signature: {}",
+                        cert.public_key_algorithm, cert.signature_algorithm
+                    )));
+                    lines.push(Line::from(format!(
+                        "  Validity: {} -> {}",
+                        cert.not_before.as_deref().unwrap_or("?"),
+                        cert.not_after.as_deref().unwrap_or("?")
+                    )));
+                    let status_style = if cert.validity_status.starts_with("EXPIRED") {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    };
                     lines.push(Line::from(vec![
                         Span::styled("  Status: ", Style::default().fg(Color::DarkGray)),
                         Span::styled(cert.validity_status, status_style),
                     ]));
                     lines.push(Line::from(vec![
                         Span::styled("  SHA-256 Fingerprint: ", Style::default().fg(Color::Cyan)),
-                        Span::styled(cert.fingerprint_sha256, Style::default().fg(Color::LightCyan)),
+                        Span::styled(
+                            cert.fingerprint_sha256,
+                            Style::default().fg(Color::LightCyan),
+                        ),
                     ]));
                     if !cert.subject_alt_names.is_empty() {
-                        lines.push(Line::from(Span::styled(format!("  SANs ({} hostnames):", cert.subject_alt_names.len()), Style::default().fg(Color::LightBlue))));
+                        lines.push(Line::from(Span::styled(
+                            format!("  SANs ({} hostnames):", cert.subject_alt_names.len()),
+                            Style::default().fg(Color::LightBlue),
+                        )));
                         for san in cert.subject_alt_names.iter().take(10) {
                             lines.push(Line::from(format!("    • {}", san)));
                         }
                     }
                 } else if let Some(crl) = X509Parser::parse_crl(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- X.509 Certificate Revocation List (CRL) ---", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- X.509 Certificate Revocation List (CRL) ---",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::from(format!("  Issuer: {}", crl.issuer_dn)));
-                    lines.push(Line::from(format!("  Revoked Certificates Count: {}", crl.revoked_count)));
-                    lines.push(Line::from(format!("  Updates: {} -> {}", crl.this_update.as_deref().unwrap_or("?"), crl.next_update.as_deref().unwrap_or("?"))));
+                    lines.push(Line::from(format!(
+                        "  Revoked Certificates Count: {}",
+                        crl.revoked_count
+                    )));
+                    lines.push(Line::from(format!(
+                        "  Updates: {} -> {}",
+                        crl.this_update.as_deref().unwrap_or("?"),
+                        crl.next_update.as_deref().unwrap_or("?")
+                    )));
                 } else if let Some(csr) = X509Parser::parse_csr(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- X.509 Certificate Signing Request (CSR) ---", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- X.509 Certificate Signing Request (CSR) ---",
+                        Style::default()
+                            .fg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::from(format!("  Subject: {}", csr.subject_dn)));
-                    lines.push(Line::from(format!("  Public Key: {}", csr.public_key_algorithm)));
+                    lines.push(Line::from(format!(
+                        "  Public Key: {}",
+                        csr.public_key_algorithm
+                    )));
                 } else {
-                    lines.push(Line::raw("No X.509 ASN.1 certificate, CRL, or CSR payload detected."));
+                    lines.push(Line::raw(
+                        "No X.509 ASN.1 certificate, CRL, or CSR payload detected.",
+                    ));
                 }
             }
             6 => {
@@ -1608,11 +2210,20 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                         lines.extend(diff_lines);
                     }
                 } else {
-                    lines.push(Line::from(Span::styled("--- Side-by-Side Diff Inspector ---", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                    lines.push(Line::from(Span::styled(
+                        "--- Side-by-Side Diff Inspector ---",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                     lines.push(Line::raw("No diff baseline selected yet."));
                     lines.push(Line::raw(""));
-                    lines.push(Line::from("1. Navigate to a packet and press [d] to set baseline 📌."));
-                    lines.push(Line::from("2. Navigate to another packet and press [d] to diff!"));
+                    lines.push(Line::from(
+                        "1. Navigate to a packet and press [d] to set baseline 📌.",
+                    ));
+                    lines.push(Line::from(
+                        "2. Navigate to another packet and press [d] to diff!",
+                    ));
                     lines.push(Line::from("3. Press [Esc] to return."));
                 }
             }
@@ -1631,7 +2242,8 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 
         // Render scrollbar
         if state.details_max_scroll > 0 {
-            let mut scrollbar_state = ScrollbarState::new(state.details_max_scroll).position(state.details_scroll);
+            let mut scrollbar_state =
+                ScrollbarState::new(state.details_max_scroll).position(state.details_scroll);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
@@ -1648,7 +2260,11 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 fn draw_hexdump_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: Rect) {
     let maybe_event = state.selected_event();
     let is_focused = state.active_pane == ActivePane::Hexdump;
-    let right_border = if is_focused { Color::Cyan } else { Color::DarkGray };
+    let right_border = if is_focused {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
 
     let hex_block = Block::default()
         .borders(Borders::ALL)
@@ -1681,9 +2297,15 @@ fn draw_hexdump_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             }
 
             let line = Line::from(vec![
-                Span::styled(format!("{:08x}: ", offset), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:08x}: ", offset),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(hex_part, Style::default().fg(Color::LightBlue)),
-                Span::styled(format!("|{}|", ascii_part), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("|{}|", ascii_part),
+                    Style::default().fg(Color::Yellow),
+                ),
             ]);
             hex_lines.push(line);
         }
@@ -1699,7 +2321,8 @@ fn draw_hexdump_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 
         // Render scrollbar
         if state.hex_max_scroll > 0 {
-            let mut scrollbar_state = ScrollbarState::new(state.hex_max_scroll).position(state.hex_scroll);
+            let mut scrollbar_state =
+                ScrollbarState::new(state.hex_max_scroll).position(state.hex_scroll);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
@@ -1716,8 +2339,18 @@ fn draw_hexdump_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 fn draw_footer(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
     if state.command_mode {
         let p = Paragraph::new(Line::from(vec![
-            Span::styled(":", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(&state.command_input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                ":",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &state.command_input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Yellow)),
         ]));
         f.render_widget(p, area);
@@ -1726,8 +2359,18 @@ fn draw_footer(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
 
     if state.search_mode {
         let p = Paragraph::new(Line::from(vec![
-            Span::styled("/", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(&state.search_input, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &state.search_input,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Cyan)),
         ]));
         f.render_widget(p, area);
@@ -1738,7 +2381,12 @@ fn draw_footer(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
         if time.elapsed() < Duration::from_secs(4) {
             let p = Paragraph::new(Line::from(vec![
                 Span::styled("🔔 ", Style::default().fg(Color::Yellow)),
-                Span::styled(msg, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    msg,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
             f.render_widget(p, area);
             return;
@@ -1746,27 +2394,82 @@ fn draw_footer(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
     }
 
     let hotkeys = Line::from(vec![
-        Span::styled("[q]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[q]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Quit "),
-        Span::styled("[Space]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Space]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Pause "),
-        Span::styled("[/]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[/]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Filter "),
-        Span::styled("[R]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[R]",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Repeater "),
-        Span::styled("[r]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[r]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" FastReplay "),
-        Span::styled("[d]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[d]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Diff "),
-        Span::styled("[f]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[f]",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Fullscreen "),
-        Span::styled("[s]", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[s]",
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Save "),
-        Span::styled("[?]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[?]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Help "),
-        Span::styled("[Tab]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[Tab]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Panes "),
-        Span::styled("[1-7]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[1-7]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Tabs "),
     ]);
     let p = Paragraph::new(hotkeys);

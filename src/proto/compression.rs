@@ -1,7 +1,9 @@
-//! Stream Decompression Engine (Gzip, Deflate, Brotli, Zstandard).
+//! Stream Decompression Engine (Brotli, Gzip, Deflate, Zstandard).
 //!
 //! Provides transparent payload decompression for HTTP responses and WebSockets,
 //! enabling plaintext inspection and schema generation even when content compression is enabled.
+
+use std::io::Read;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionAlgorithm {
@@ -34,10 +36,18 @@ impl CompressionAlgorithm {
         if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
             return CompressionAlgorithm::Gzip;
         }
-        if data.len() >= 4 && data[0] == 0x28 && data[1] == 0xb5 && data[2] == 0x2f && data[3] == 0xfd {
+        if data.len() >= 4
+            && data[0] == 0x28
+            && data[1] == 0xb5
+            && data[2] == 0x2f
+            && data[3] == 0xfd
+        {
             return CompressionAlgorithm::Zstd;
         }
-        if data.len() >= 2 && data[0] == 0x78 && (data[1] == 0x01 || data[1] == 0x9c || data[1] == 0xda) {
+        if data.len() >= 2
+            && data[0] == 0x78
+            && (data[1] == 0x01 || data[1] == 0x9c || data[1] == 0xda)
+        {
             return CompressionAlgorithm::Deflate;
         }
         CompressionAlgorithm::Identity
@@ -65,117 +75,52 @@ impl Decompressor {
         };
 
         match algo {
-            CompressionAlgorithm::Gzip => Self::decompress_gzip(data).unwrap_or_else(|_| data.to_vec()),
-            CompressionAlgorithm::Deflate => Self::decompress_deflate(data).unwrap_or_else(|_| data.to_vec()),
+            CompressionAlgorithm::Gzip => {
+                Self::decompress_gzip(data).unwrap_or_else(|_| data.to_vec())
+            }
+            CompressionAlgorithm::Deflate => {
+                Self::decompress_deflate(data).unwrap_or_else(|_| data.to_vec())
+            }
+            CompressionAlgorithm::Brotli => {
+                Self::decompress_brotli(data).unwrap_or_else(|_| data.to_vec())
+            }
             CompressionAlgorithm::Zstd => Self::decompress_zstd_fallback(data),
-            CompressionAlgorithm::Brotli => Self::decompress_brotli_fallback(data),
             CompressionAlgorithm::Identity => data.to_vec(),
         }
     }
 
-    /// Decompresses RFC 1952 Gzip data using minimal zero-dependency decoder.
-    pub fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if data.len() < 10 {
-            return Err("Gzip payload too short");
-        }
-        if data[0] != 0x1f || data[1] != 0x8b {
-            return Err("Invalid Gzip magic bytes");
-        }
-
-        // Parse Gzip header
-        let method = data[2];
-        let flags = data[3];
-        if method != 8 {
-            return Err("Unsupported Gzip compression method (not DEFLATE)");
-        }
-
-        let mut offset = 10;
-        // FEXTRA
-        if flags & 0x04 != 0 {
-            if offset + 2 > data.len() {
-                return Err("Malformed FEXTRA");
-            }
-            let xlen = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-            offset += 2 + xlen;
-        }
-        // FNAME
-        if flags & 0x08 != 0 {
-            while offset < data.len() && data[offset] != 0 {
-                offset += 1;
-            }
-            offset += 1; // skip null
-        }
-        // FCOMMENT
-        if flags & 0x10 != 0 {
-            while offset < data.len() && data[offset] != 0 {
-                offset += 1;
-            }
-            offset += 1; // skip null
-        }
-        // FHCRC
-        if flags & 0x02 != 0 {
-            offset += 2;
-        }
-
-        if offset >= data.len() {
-            return Err("Malformed Gzip body");
-        }
-
-        // Body ends 8 bytes before end (CRC32 + ISIZE)
-        let end = data.len().saturating_sub(8);
-        if offset >= end {
-            return Ok(Vec::new());
-        }
-
-        Self::decompress_raw_deflate(&data[offset..end])
+    /// Decompresses RFC 7932 Brotli data.
+    pub fn decompress_brotli(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        let mut decompressor = brotli::Decompressor::new(data, 4096);
+        let mut out = Vec::new();
+        decompressor.read_to_end(&mut out)?;
+        Ok(out)
     }
 
-    /// Decompresses RFC 1950 Zlib/Deflate data.
-    #[allow(clippy::manual_is_multiple_of)]
-    pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if data.len() < 2 {
-            return Err("Deflate payload too short");
-        }
-        let cmf = data[0];
-        let flg = data[1];
-        if (cmf as u16 * 256 + flg as u16) % 31 != 0 {
-            // Raw deflate without zlib header
-            return Self::decompress_raw_deflate(data);
-        }
-        // Skip 2-byte zlib header and 4-byte Adler32 checksum at end
-        let end = data.len().saturating_sub(4);
-        if 2 >= end {
-            return Ok(Vec::new());
-        }
-        Self::decompress_raw_deflate(&data[2..end])
+    /// Decompresses RFC 1952 Gzip data using flate2.
+    pub fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        let mut decoder = flate2::read::GzDecoder::new(data);
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out)?;
+        Ok(out)
     }
 
-    /// Uncompressed raw DEFLATE blocks processor (BTYPE 00) with fallback.
-    fn decompress_raw_deflate(raw: &[u8]) -> Result<Vec<u8>, &'static str> {
-        if raw.is_empty() {
-            return Ok(Vec::new());
+    /// Decompresses RFC 1950/1951 Zlib/Deflate data.
+    pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        // Try Zlib first (with 2-byte header)
+        let mut zlib_decoder = flate2::read::ZlibDecoder::new(data);
+        let mut out = Vec::new();
+        if zlib_decoder.read_to_end(&mut out).is_ok() && !out.is_empty() {
+            return Ok(out);
         }
-
-        // Fast path: if uncompressed block (BTYPE=00)
-        let first = raw[0];
-        let btype = (first >> 1) & 0x03;
-        if btype == 0 && raw.len() >= 5 {
-            let len = u16::from_le_bytes([raw[1], raw[2]]) as usize;
-            let nlen = u16::from_le_bytes([raw[3], raw[4]]) as usize;
-            if (len ^ 0xffff) == nlen && 5 + len <= raw.len() {
-                return Ok(raw[5..5 + len].to_vec());
-            }
-        }
-
-        // Return raw buffer if complex compressed tree
-        Ok(raw.to_vec())
+        // Fallback to raw Deflate (without zlib header, e.g. WebSocket permessage-deflate)
+        let mut deflate_decoder = flate2::read::DeflateDecoder::new(data);
+        let mut out_raw = Vec::new();
+        deflate_decoder.read_to_end(&mut out_raw)?;
+        Ok(out_raw)
     }
 
     fn decompress_zstd_fallback(data: &[u8]) -> Vec<u8> {
-        data.to_vec()
-    }
-
-    fn decompress_brotli_fallback(data: &[u8]) -> Vec<u8> {
         data.to_vec()
     }
 }
@@ -186,30 +131,87 @@ mod tests {
 
     #[test]
     fn test_detect_compression_algorithms() {
-        assert_eq!(CompressionAlgorithm::from_header("gzip"), CompressionAlgorithm::Gzip);
-        assert_eq!(CompressionAlgorithm::from_header("deflate, gzip"), CompressionAlgorithm::Gzip);
-        assert_eq!(CompressionAlgorithm::from_header("br"), CompressionAlgorithm::Brotli);
-        assert_eq!(CompressionAlgorithm::from_header("zstd"), CompressionAlgorithm::Zstd);
-        assert_eq!(CompressionAlgorithm::from_header("identity"), CompressionAlgorithm::Identity);
+        assert_eq!(
+            CompressionAlgorithm::from_header("gzip"),
+            CompressionAlgorithm::Gzip
+        );
+        assert_eq!(
+            CompressionAlgorithm::from_header("deflate, gzip"),
+            CompressionAlgorithm::Gzip
+        );
+        assert_eq!(
+            CompressionAlgorithm::from_header("br"),
+            CompressionAlgorithm::Brotli
+        );
+        assert_eq!(
+            CompressionAlgorithm::from_header("zstd"),
+            CompressionAlgorithm::Zstd
+        );
+        assert_eq!(
+            CompressionAlgorithm::from_header("identity"),
+            CompressionAlgorithm::Identity
+        );
 
         let gzip_magic = [0x1f, 0x8b, 0x08, 0x00];
-        assert_eq!(CompressionAlgorithm::from_magic(&gzip_magic), CompressionAlgorithm::Gzip);
+        assert_eq!(
+            CompressionAlgorithm::from_magic(&gzip_magic),
+            CompressionAlgorithm::Gzip
+        );
 
         let zstd_magic = [0x28, 0xb5, 0x2f, 0xfd];
-        assert_eq!(CompressionAlgorithm::from_magic(&zstd_magic), CompressionAlgorithm::Zstd);
+        assert_eq!(
+            CompressionAlgorithm::from_magic(&zstd_magic),
+            CompressionAlgorithm::Zstd
+        );
     }
 
     #[test]
-    fn test_decompress_raw_uncompressed_deflate_block() {
-        // Construct raw deflate uncompressed block:
-        // BFINAL=1, BTYPE=00 -> 0x01
-        // LEN=5 (0x0005) -> 0x05, 0x00
-        // NLEN=~5 (0xfffa) -> 0xfa, 0xff
-        // Data = "HELLO"
-        let mut block = vec![0x01, 0x05, 0x00, 0xfa, 0xff];
-        block.extend_from_slice(b"HELLO");
+    fn test_brotli_roundtrip_compression_decompression() {
+        use std::io::Write;
+        let plaintext = b"Brotli is the premier web compression algorithm RFC 7932 in NullCA!";
+        let mut compressed = Vec::new();
+        {
+            let mut compressor = brotli::CompressorWriter::new(&mut compressed, 4096, 6, 22);
+            compressor.write_all(plaintext).unwrap();
+        }
 
-        let decompressed = Decompressor::decompress_raw_deflate(&block).unwrap();
-        assert_eq!(decompressed, b"HELLO");
+        assert!(!compressed.is_empty());
+        let decompressed = Decompressor::decompress_brotli(&compressed).expect("Decompress brotli");
+        assert_eq!(decompressed, plaintext);
+
+        // Auto-detection via header
+        let auto_decompressed = Decompressor::decompress(&compressed, Some("br"));
+        assert_eq!(auto_decompressed, plaintext);
+    }
+
+    #[test]
+    fn test_gzip_roundtrip_compression_decompression() {
+        use std::io::Write;
+        let plaintext = b"Gzip compression verified with flate2 in NullCA!";
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(plaintext).unwrap();
+        }
+
+        let decompressed = Decompressor::decompress_gzip(&compressed).expect("Decompress gzip");
+        assert_eq!(decompressed, plaintext);
+    }
+
+    #[test]
+    fn test_deflate_raw_and_zlib() {
+        use std::io::Write;
+        let plaintext = b"Deflate raw and zlib streams verified in NullCA!";
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(plaintext).unwrap();
+        }
+
+        let decompressed =
+            Decompressor::decompress_deflate(&compressed).expect("Decompress raw deflate");
+        assert_eq!(decompressed, plaintext);
     }
 }

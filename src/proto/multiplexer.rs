@@ -84,11 +84,14 @@ impl Http2Session {
         }
 
         let stream_id = frame.stream_id;
-        let stream = self.streams.entry(stream_id).or_insert_with(|| Http2StreamBuffer {
-            stream_id,
-            state: Some(StreamState::Open),
-            ..Default::default()
-        });
+        let stream = self
+            .streams
+            .entry(stream_id)
+            .or_insert_with(|| Http2StreamBuffer {
+                stream_id,
+                state: Some(StreamState::Open),
+                ..Default::default()
+            });
 
         match frame.frame_type {
             Http2FrameType::Headers => {
@@ -111,7 +114,15 @@ impl Http2Session {
                 }
 
                 if payload_offset < frame.payload.len() {
-                    stream.header_block_buffer.extend_from_slice(&frame.payload[payload_offset..]);
+                    stream
+                        .header_block_buffer
+                        .extend_from_slice(&frame.payload[payload_offset..]);
+                }
+
+                // Guard against CONTINUATION flood (CVE-2024-27983)
+                if stream.header_block_buffer.len() > self.max_header_list_size {
+                    stream.header_block_buffer.clear();
+                    return completed;
                 }
 
                 if end_headers {
@@ -125,9 +136,41 @@ impl Http2Session {
                     stream.end_stream_received = true;
                 }
             }
+            Http2FrameType::PushPromise => {
+                let end_headers = (frame.flags & 0x04) != 0;
+                let mut payload_offset = 0;
+                if (frame.flags & 0x08) != 0 && !frame.payload.is_empty() {
+                    payload_offset += 1;
+                }
+                // Skip 4-byte promised stream id
+                payload_offset += 4;
+                if payload_offset < frame.payload.len() {
+                    stream
+                        .header_block_buffer
+                        .extend_from_slice(&frame.payload[payload_offset..]);
+                }
+
+                if stream.header_block_buffer.len() > self.max_header_list_size {
+                    stream.header_block_buffer.clear();
+                    return completed;
+                }
+
+                if end_headers {
+                    stream.headers_complete = true;
+                    if let Ok(hdrs) = self.hpack_decoder.decode(&stream.header_block_buffer) {
+                        stream.headers = hdrs.into_iter().map(|h| (h.name, h.value)).collect();
+                    }
+                }
+            }
             Http2FrameType::Continuation => {
                 let end_headers = (frame.flags & 0x04) != 0;
                 stream.header_block_buffer.extend_from_slice(&frame.payload);
+
+                // Guard against CONTINUATION flood (CVE-2024-27983)
+                if stream.header_block_buffer.len() > self.max_header_list_size {
+                    stream.header_block_buffer.clear();
+                    return completed;
+                }
 
                 if end_headers {
                     stream.headers_complete = true;

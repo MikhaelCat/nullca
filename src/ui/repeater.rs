@@ -296,7 +296,9 @@ impl RepeaterState {
             .borders(Borders::ALL)
             .title(Span::styled(
                 " ⚡ NullCA Request Repeater & Live Tamper Cockpit ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
             .border_style(Style::default().fg(Color::Cyan));
         f.render_widget(outer_block, area);
@@ -323,7 +325,12 @@ impl RepeaterState {
     fn draw_request_editor(&self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Request Editor ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                " Request Editor ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .border_style(Style::default().fg(Color::Yellow));
         f.render_widget(block, area);
 
@@ -337,11 +344,11 @@ impl RepeaterState {
         let v_chunks = Layout::default()
             .direction(LayoutDirection::Vertical)
             .constraints([
-                Constraint::Length(3), // Target config (Method, Host, Port)
-                Constraint::Length(3), // Path
+                Constraint::Length(3),      // Target config (Method, Host, Port)
+                Constraint::Length(3),      // Path
                 Constraint::Percentage(40), // Headers
                 Constraint::Percentage(40), // Body
-                Constraint::Length(3), // Action bar
+                Constraint::Length(3),      // Action bar
             ])
             .split(req_inner);
 
@@ -357,35 +364,55 @@ impl RepeaterState {
 
         // Method
         let method_style = if self.active_field == RepeaterField::Method {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
         let method_block = Block::default()
             .borders(Borders::ALL)
             .title("Method")
-            .border_style(if self.active_field == RepeaterField::Method { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
-        let p_method = Paragraph::new(format!("{}_", self.method)).style(method_style).block(method_block);
+            .border_style(if self.active_field == RepeaterField::Method {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        let p_method = Paragraph::new(format!("{}_", self.method))
+            .style(method_style)
+            .block(method_block);
         f.render_widget(p_method, h_target_chunks[0]);
 
         // Host
         let host_style = if self.active_field == RepeaterField::Host {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
         let host_block = Block::default()
             .borders(Borders::ALL)
             .title("Target Host")
-            .border_style(if self.active_field == RepeaterField::Host { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
-        let p_host = Paragraph::new(format!("{}_", self.host)).style(host_style).block(host_block);
+            .border_style(if self.active_field == RepeaterField::Host {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        let p_host = Paragraph::new(format!("{}_", self.host))
+            .style(host_style)
+            .block(host_block);
         f.render_widget(p_host, h_target_chunks[1]);
 
         // Port
         let port_block = Block::default()
             .borders(Borders::ALL)
             .title(if self.use_tls { "Port (TLS)" } else { "Port" })
-            .border_style(if self.active_field == RepeaterField::Port { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
+            .border_style(if self.active_field == RepeaterField::Port {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
         let p_port = Paragraph::new(format!("{}_", self.port)).block(port_block);
         f.render_widget(p_port, h_target_chunks[2]);
 
@@ -393,7 +420,11 @@ impl RepeaterState {
         let path_block = Block::default()
             .borders(Borders::ALL)
             .title("URI Path")
-            .border_style(if self.active_field == RepeaterField::Path { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
+            .border_style(if self.active_field == RepeaterField::Path {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
         let p_path = Paragraph::new(format!("{}_", self.path)).block(path_block);
         f.render_widget(p_path, v_chunks[1]);
 
@@ -401,25 +432,42 @@ impl RepeaterState {
         let headers_block = Block::default()
             .borders(Borders::ALL)
             .title("HTTP Request Headers (Key: Value)")
-            .border_style(if self.active_field == RepeaterField::Headers { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
-        let p_headers = Paragraph::new(format!("{}_", self.headers_text)).block(headers_block).wrap(Wrap { trim: false });
+            .border_style(if self.active_field == RepeaterField::Headers {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        let p_headers = Paragraph::new(format!("{}_", self.headers_text))
+            .block(headers_block)
+            .wrap(Wrap { trim: false });
         f.render_widget(p_headers, v_chunks[2]);
 
         // 4. Body
         let body_block = Block::default()
             .borders(Borders::ALL)
             .title("Request Body (JSON / Plaintext)")
-            .border_style(if self.active_field == RepeaterField::Body { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) });
-        let p_body = Paragraph::new(format!("{}_", self.body_text)).block(body_block).wrap(Wrap { trim: false });
+            .border_style(if self.active_field == RepeaterField::Body {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            });
+        let p_body = Paragraph::new(format!("{}_", self.body_text))
+            .block(body_block)
+            .wrap(Wrap { trim: false });
         f.render_widget(p_body, v_chunks[3]);
 
         // 5. Send Action Bar
         let btn_style = if self.active_field == RepeaterField::SendButton {
-            Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)
+            Style::default()
+                .bg(Color::Green)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
         } else if self.is_transmitting {
             Style::default().bg(Color::Yellow).fg(Color::Black)
         } else {
-            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD)
         };
         let btn_label = if self.is_transmitting {
             " ⏳ Transmitting Live Request... "
@@ -440,7 +488,12 @@ impl RepeaterState {
     fn draw_response_inspector(&mut self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Live Server Response ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD)))
+            .title(Span::styled(
+                " Live Server Response ",
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .border_style(Style::default().fg(Color::LightCyan));
         f.render_widget(block, area);
 
@@ -453,7 +506,10 @@ impl RepeaterState {
 
         if let Some(ref err) = self.error_msg {
             let p_err = Paragraph::new(Line::from(vec![
-                Span::styled("❌ Replay Transmission Error: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "❌ Replay Transmission Error: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(err.clone()),
             ]));
             f.render_widget(p_err, resp_inner);
@@ -463,7 +519,9 @@ impl RepeaterState {
         if self.is_transmitting {
             let p_loading = Paragraph::new(Span::styled(
                 "⏳ Connecting to target & measuring latency telemetry...",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
             f.render_widget(p_loading, resp_inner);
             return;
@@ -473,7 +531,7 @@ impl RepeaterState {
             let v_chunks = Layout::default()
                 .direction(LayoutDirection::Vertical)
                 .constraints([
-                    Constraint::Length(3), // Status & telemetry line
+                    Constraint::Length(3),      // Status & telemetry line
                     Constraint::Percentage(35), // Response headers
                     Constraint::Percentage(60), // Response body
                 ])
@@ -492,18 +550,35 @@ impl RepeaterState {
 
             let (total_ms, ttfb_ms) = self.response_metrics.unwrap_or((0.0, 0.0));
             let metrics_line = Line::from(vec![
-                Span::styled(format!("HTTP {} ", status), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("HTTP {} ", status),
+                    Style::default()
+                        .fg(status_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" | "),
                 Span::styled("Total Latency: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.2} ms", total_ms), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{:.2} ms", total_ms),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" | "),
                 Span::styled("TTFB: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.2} ms", ttfb_ms), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:.2} ms", ttfb_ms),
+                    Style::default().fg(Color::Yellow),
+                ),
                 Span::raw(" | "),
                 Span::styled("Body Size: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} bytes", self.response_body.len()), Style::default().fg(Color::LightGreen)),
+                Span::styled(
+                    format!("{} bytes", self.response_body.len()),
+                    Style::default().fg(Color::LightGreen),
+                ),
             ]);
-            let p_metrics = Paragraph::new(metrics_line).block(Block::default().borders(Borders::ALL).title("Status"));
+            let p_metrics = Paragraph::new(metrics_line)
+                .block(Block::default().borders(Borders::ALL).title("Status"));
             f.render_widget(p_metrics, v_chunks[0]);
 
             // Response Headers
@@ -515,7 +590,11 @@ impl RepeaterState {
                 ]));
             }
             let p_headers = Paragraph::new(header_lines)
-                .block(Block::default().borders(Borders::ALL).title("Response Headers"))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Response Headers"),
+                )
                 .wrap(Wrap { trim: false });
             f.render_widget(p_headers, v_chunks[1]);
 
@@ -529,7 +608,10 @@ impl RepeaterState {
             self.response_max_scroll = body_lines.len().saturating_sub(visible_h);
             self.response_scroll = self.response_scroll.min(self.response_max_scroll);
 
-            let body_title = format!("Response Body (Scroll: {}/{} - PgUp/PgDn)", self.response_scroll, self.response_max_scroll);
+            let body_title = format!(
+                "Response Body (Scroll: {}/{} - PgUp/PgDn)",
+                self.response_scroll, self.response_max_scroll
+            );
             let p_body = Paragraph::new(body_lines)
                 .block(Block::default().borders(Borders::ALL).title(body_title))
                 .scroll((self.response_scroll as u16, 0))
@@ -538,7 +620,10 @@ impl RepeaterState {
         } else {
             let p_idle = Paragraph::new(Line::from(vec![
                 Span::styled("No response yet. ", Style::default().fg(Color::DarkGray)),
-                Span::styled("Press [Ctrl+R] or Enter on 'Send Request' to transmit.", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    "Press [Ctrl+R] or Enter on 'Send Request' to transmit.",
+                    Style::default().fg(Color::Yellow),
+                ),
             ]));
             f.render_widget(p_idle, resp_inner);
         }

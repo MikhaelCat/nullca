@@ -135,7 +135,11 @@ impl ElfBinary {
                 let mut strtab = vec![0u8; strtab_sec.sh_size as usize];
                 file.read_exact(&mut strtab)?;
 
-                let entry_size = if sh.sh_entsize == 0 { 24 } else { sh.sh_entsize };
+                let entry_size = if sh.sh_entsize == 0 {
+                    24
+                } else {
+                    sh.sh_entsize
+                };
                 let num_syms = (sh.sh_size / entry_size) as usize;
 
                 for s in 0..num_syms {
@@ -166,7 +170,8 @@ impl ElfBinary {
                                     if target_sec.sh_addr <= st_value
                                         && st_value < (target_sec.sh_addr + target_sec.sh_size)
                                     {
-                                        file_offset = target_sec.sh_offset + (st_value - target_sec.sh_addr);
+                                        file_offset =
+                                            target_sec.sh_offset + (st_value - target_sec.sh_addr);
                                         break;
                                     }
                                 }
@@ -192,7 +197,9 @@ impl ElfBinary {
     }
 
     pub fn find_symbol(&self, pattern: &str) -> Option<&SymbolInfo> {
-        self.symbols.iter().find(|s| s.name == pattern || s.name.starts_with(pattern))
+        self.symbols
+            .iter()
+            .find(|s| s.name == pattern || s.name.starts_with(pattern))
     }
 
     pub fn find_symbols_containing(&self, query: &str) -> Vec<&SymbolInfo> {

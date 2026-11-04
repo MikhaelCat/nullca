@@ -104,7 +104,10 @@ impl WebServer {
     /// Launches the embedded HTTP server on specified port.
     pub async fn start(port: u16, events: Arc<Mutex<Vec<TlsEvent>>>) -> anyhow::Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
-        println!("🚀 NullCA Web Cockpit is live at: http://127.0.0.1:{}", port);
+        println!(
+            "🚀 NullCA Web Cockpit is live at: http://127.0.0.1:{}",
+            port
+        );
 
         loop {
             let (mut socket, _) = listener.accept().await?;

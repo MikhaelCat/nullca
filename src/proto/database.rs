@@ -63,8 +63,20 @@ impl NonHttpDissector {
         if !tokens.is_empty() {
             let cmd = tokens[0].to_uppercase();
             let known_cmds = [
-                "PING", "AUTH", "GET", "SET", "DEL", "HGET", "HSET", "INFO", "SELECT", "EXPIRE",
-                "TTL", "KEYS", "SUBSCRIBE", "PUBLISH",
+                "PING",
+                "AUTH",
+                "GET",
+                "SET",
+                "DEL",
+                "HGET",
+                "HSET",
+                "INFO",
+                "SELECT",
+                "EXPIRE",
+                "TTL",
+                "KEYS",
+                "SUBSCRIBE",
+                "PUBLISH",
             ];
             if known_cmds.contains(&cmd.as_str()) {
                 return Some(RedisCommand {
@@ -103,8 +115,18 @@ impl NonHttpDissector {
         let upper = first_line.to_uppercase();
 
         let smtp_prefixes = [
-            "EHLO ", "HELO ", "MAIL FROM:", "RCPT TO:", "AUTH LOGIN", "AUTH PLAIN", "DATA",
-            "QUIT", "220 ", "250 ", "354 ", "550 ",
+            "EHLO ",
+            "HELO ",
+            "MAIL FROM:",
+            "RCPT TO:",
+            "AUTH LOGIN",
+            "AUTH PLAIN",
+            "DATA",
+            "QUIT",
+            "220 ",
+            "250 ",
+            "354 ",
+            "550 ",
         ];
 
         for prefix in smtp_prefixes {

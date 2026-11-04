@@ -5,6 +5,7 @@ pub mod proto;
 pub mod ui;
 
 pub use bpf::loader::BpfLoader;
+pub use engine::audit::{AuditCategory, AuditFinding, AuditReport, AuditSeverity, SecurityAuditor};
 pub use engine::diff::{DiffEngine, DiffKind, DiffLine, EventDiffResult};
 pub use engine::discover::{ProcessScanner, TargetProcess, TlsFlavor};
 pub use engine::event::{Direction, ProtocolType, TlsEvent};
@@ -19,7 +20,9 @@ pub use engine::symbols::ElfBinary;
 pub use export::curl::CurlExporter;
 pub use export::graphql::{GqlFieldType, GqlObjectType, GraphQLSchema, GraphQLSynthesizer};
 pub use export::har::HarExporter;
+pub use export::openapi::{OpenApiGenerator, OpenApiSpec};
 pub use export::pcapng::PcapNgWriter;
+pub use export::sslkeylog::{SslKeyLogEntry, SslKeyLogWriter, TlsKeyLabel};
 pub use export::terminal::TerminalFormatter;
 pub use proto::compression::{CompressionAlgorithm, Decompressor};
 pub use proto::database::{DatabaseProtocol, NonHttpDissector, RedisCommand};
@@ -33,9 +36,7 @@ pub use proto::qpack::QpackDecoder;
 pub use proto::reassembler::StreamReassembler;
 pub use proto::secrets::{scan_secrets, DetectedSecret, SecretDetector, SecretKind};
 pub use proto::websocket::{WebSocketAssembler, WebSocketFrame, WebSocketOpcode, WebSocketParser};
-pub use proto::x509::{CertScanSummary, RevokedCertEntry, X509CertificateInfo, X509CrlInfo, X509CsrInfo, X509Parser};
+pub use proto::x509::{
+    CertScanSummary, RevokedCertEntry, X509CertificateInfo, X509CrlInfo, X509CsrInfo, X509Parser,
+};
 pub use ui::web::WebServer;
-pub use engine::audit::{AuditCategory, AuditFinding, AuditReport, AuditSeverity, SecurityAuditor};
-pub use export::openapi::{OpenApiGenerator, OpenApiSpec};
-pub use export::sslkeylog::{SslKeyLogEntry, SslKeyLogWriter, TlsKeyLabel};
-

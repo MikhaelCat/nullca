@@ -18,7 +18,14 @@ impl GrpcMessage {
         }
         let payload = data[5..total].to_vec();
         let remaining = &data[total..];
-        Ok((Self { is_compressed, length, payload }, remaining))
+        Ok((
+            Self {
+                is_compressed,
+                length,
+                payload,
+            },
+            remaining,
+        ))
     }
 }
 
@@ -58,7 +65,7 @@ mod tests {
     #[test]
     fn test_parse_grpc_message() {
         let raw = [
-            0x00,                   // uncompressed
+            0x00, // uncompressed
             0x00, 0x00, 0x00, 0x04, // length = 4
             0x08, 0x96, 0x01, 0x00, // protobuf payload
         ];

@@ -100,10 +100,7 @@ pub struct SslKeyLogWriter {
 impl SslKeyLogWriter {
     /// Opens or creates an SSLKEYLOGFILE for appending.
     pub fn open_append<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self { file })
     }
 
@@ -152,7 +149,11 @@ mod tests {
     fn test_sslkeylog_roundtrip() {
         let random = vec![0xaa; 32];
         let master_key = vec![0xbb; 48];
-        let entry = SslKeyLogEntry::new(TlsKeyLabel::ClientRandom, random.clone(), master_key.clone());
+        let entry = SslKeyLogEntry::new(
+            TlsKeyLabel::ClientRandom,
+            random.clone(),
+            master_key.clone(),
+        );
 
         let line = entry.format_nss_line();
         assert!(line.starts_with("CLIENT_RANDOM "));
@@ -167,7 +168,11 @@ mod tests {
     fn test_sslkeylog_tls13_traffic_secret() {
         let random = vec![0x12, 0x34, 0x56, 0x78];
         let secret = vec![0xde, 0xad, 0xbe, 0xef];
-        let entry = SslKeyLogEntry::new(TlsKeyLabel::ClientTrafficSecret0, random.clone(), secret.clone());
+        let entry = SslKeyLogEntry::new(
+            TlsKeyLabel::ClientTrafficSecret0,
+            random.clone(),
+            secret.clone(),
+        );
 
         let line = entry.format_nss_line();
         let parsed = SslKeyLogEntry::parse_nss_line(&line).expect("Must parse");

@@ -73,7 +73,10 @@ fn test_rfc6455_close_status_parsing() {
     assert!(preview.contains("1001"));
     assert!(preview.contains("Going Away"));
     assert!(preview.contains("Restart"));
-    assert_eq!(WebSocketCloseDetails::description_for_code(1001), "Going Away");
+    assert_eq!(
+        WebSocketCloseDetails::description_for_code(1001),
+        "Going Away"
+    );
 }
 
 #[test]

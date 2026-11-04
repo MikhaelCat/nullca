@@ -20,12 +20,12 @@ impl PcapNgWriter {
         // Block Length repeated: 28 (4 bytes)
         let mut shb = Vec::new();
         shb.extend_from_slice(&0x0A0D0D0Au32.to_le_bytes()); // Type
-        shb.extend_from_slice(&28u32.to_le_bytes());         // Block Total Length
+        shb.extend_from_slice(&28u32.to_le_bytes()); // Block Total Length
         shb.extend_from_slice(&0x1A2B3C4Du32.to_le_bytes()); // Byte-Order Magic
-        shb.extend_from_slice(&1u16.to_le_bytes());          // Major
-        shb.extend_from_slice(&0u16.to_le_bytes());          // Minor
-        shb.extend_from_slice(&(-1i64).to_le_bytes());       // Section Length
-        shb.extend_from_slice(&28u32.to_le_bytes());         // Block Total Length
+        shb.extend_from_slice(&1u16.to_le_bytes()); // Major
+        shb.extend_from_slice(&0u16.to_le_bytes()); // Minor
+        shb.extend_from_slice(&(-1i64).to_le_bytes()); // Section Length
+        shb.extend_from_slice(&28u32.to_le_bytes()); // Block Total Length
         file.write_all(&shb)?;
 
         // 2. Write Interface Description Block (IDB)
@@ -110,9 +110,22 @@ impl PcapNgWriter {
         packet.extend_from_slice(&[0x08, 0x00]); // EtherType IPv4
 
         // 2. IPv4 Header (20 bytes)
-        let (src_ip, dst_ip) = match event.direction {
-            Direction::Egress => ([127, 0, 0, 1], [127, 0, 0, 2]),
-            Direction::Ingress => ([127, 0, 0, 2], [127, 0, 0, 1]),
+        let (src_ip, dst_ip) = {
+            let parse_ip = |s: &Option<String>| -> Option<[u8; 4]> {
+                s.as_ref()?
+                    .parse::<std::net::Ipv4Addr>()
+                    .ok()
+                    .map(|ip| ip.octets())
+            };
+            let default_egress = ([127, 0, 0, 1], [127, 0, 0, 2]);
+            let default_ingress = ([127, 0, 0, 2], [127, 0, 0, 1]);
+            let (def_src, def_dst) = match event.direction {
+                Direction::Egress => default_egress,
+                Direction::Ingress => default_ingress,
+            };
+            let src = parse_ip(&event.src_addr).unwrap_or(def_src);
+            let dst = parse_ip(&event.dst_addr).unwrap_or(def_dst);
+            (src, dst)
         };
 
         packet.push(0x45); // Version 4, IHL 5
@@ -127,10 +140,16 @@ impl PcapNgWriter {
         packet.extend_from_slice(&dst_ip);
 
         // 3. TCP Header (20 bytes)
-        let ephemeral_port = (10000 + (event.pid % 40000) + (event.fd as u32 % 1000)) as u16;
-        let (src_port, dst_port) = match event.direction {
-            Direction::Egress => (ephemeral_port, 443),
-            Direction::Ingress => (443, ephemeral_port),
+        let (src_port, dst_port) = match (event.src_port, event.dst_port) {
+            (Some(sp), Some(dp)) => (sp, dp),
+            _ => {
+                let ephemeral_port =
+                    (10000 + (event.pid % 40000) + (event.fd as u32 % 1000)) as u16;
+                match event.direction {
+                    Direction::Egress => (ephemeral_port, 443),
+                    Direction::Ingress => (443, ephemeral_port),
+                }
+            }
         };
 
         packet.extend_from_slice(&src_port.to_be_bytes());
@@ -171,12 +190,28 @@ mod tests {
                 "test".into(),
                 b"GET / HTTP/1.1\r\nHost: test.local\r\n\r\n".to_vec(),
                 Some(120),
+            )
+            .with_socket_info(
+                Some("192.168.1.50".into()),
+                Some("10.0.0.1".into()),
+                Some(54321),
+                Some(443),
             );
             writer.write_event(&event).expect("Failed to write event");
         }
 
         let bytes = std::fs::read(path).expect("Failed to read back pcapng");
-        assert!(bytes.len() > 48, "File should contain SHB, IDB and EPB blocks");
-        assert_eq!(&bytes[0..4], &[0x0A, 0x0D, 0x0D, 0x0A], "Magic SHB mismatch");
+        assert!(
+            bytes.len() > 48,
+            "File should contain SHB, IDB and EPB blocks"
+        );
+        assert_eq!(
+            &bytes[0..4],
+            &[0x0A, 0x0D, 0x0D, 0x0A],
+            "Magic SHB mismatch"
+        );
+        // Verify real IP octets exist in packet
+        assert!(bytes.windows(4).any(|w| w == [192, 168, 1, 50]));
+        assert!(bytes.windows(4).any(|w| w == [10, 0, 0, 1]));
     }
 }

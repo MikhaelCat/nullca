@@ -86,7 +86,11 @@ impl CurlExporter {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> String {
-        let mut cmd = format!("curl -X {} '{}'", method.to_uppercase(), escape_single_quotes(url));
+        let mut cmd = format!(
+            "curl -X {} '{}'",
+            method.to_uppercase(),
+            escape_single_quotes(url)
+        );
 
         // Add headers (excluding content-length which curl handles automatically)
         let mut sorted_headers: Vec<(&String, &String)> = headers.iter().collect();
@@ -96,14 +100,24 @@ impl CurlExporter {
             if k.eq_ignore_ascii_case("content-length") {
                 continue;
             }
-            cmd.push_str(&format!(" \\\n  -H '{}: {}'", escape_single_quotes(k), escape_single_quotes(v)));
+            cmd.push_str(&format!(
+                " \\\n  -H '{}: {}'",
+                escape_single_quotes(k),
+                escape_single_quotes(v)
+            ));
         }
 
         if !body.is_empty() {
             if let Ok(body_str) = std::str::from_utf8(body) {
-                cmd.push_str(&format!(" \\\n  --data-raw '{}'", escape_single_quotes(body_str)));
+                cmd.push_str(&format!(
+                    " \\\n  --data-raw '{}'",
+                    escape_single_quotes(body_str)
+                ));
             } else {
-                cmd.push_str(&format!(" \\\n  --data-binary $'{}'", escape_hex_binary(body)));
+                cmd.push_str(&format!(
+                    " \\\n  --data-binary $'{}'",
+                    escape_hex_binary(body)
+                ));
             }
         }
 

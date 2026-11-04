@@ -1,7 +1,7 @@
 use nullca::engine::event::{Direction, TlsEvent};
 use nullca::engine::filter::FilterEngine;
-use nullca::proto::huffman::{decode_huffman, encode_huffman};
 use nullca::proto::http2::{Http2Frame, Http2FrameType};
+use nullca::proto::huffman::{decode_huffman, encode_huffman};
 use nullca::proto::multiplexer::Http2Session;
 use nullca::proto::protobuf::{encode_varint, ProtobufMessage, ProtobufValue};
 
@@ -32,7 +32,10 @@ fn test_advanced_protobuf_nested_decode() {
     outer.extend_from_slice(&inner);
 
     let decoded = ProtobufMessage::decode(&outer).expect("Failed to decode outer protobuf");
-    assert_eq!(decoded.fields.get(&1).unwrap()[0], ProtobufValue::Varint(42));
+    assert_eq!(
+        decoded.fields.get(&1).unwrap()[0],
+        ProtobufValue::Varint(42)
+    );
 
     match &decoded.fields.get(&2).unwrap()[0] {
         ProtobufValue::Message(sub) => {
@@ -105,7 +108,7 @@ fn test_advanced_http2_multiplexing_with_continuation() {
     let headers1_continuation = Http2Frame {
         length: 1,
         frame_type: Http2FrameType::Continuation,
-        flags: 0x04,         // END_HEADERS
+        flags: 0x04, // END_HEADERS
         stream_id: 1,
         payload: vec![0x84], // :path: /
     };
@@ -137,7 +140,10 @@ fn test_huffman_stress_and_padding() {
 
     for s in strings {
         let enc = encode_huffman(s.as_bytes());
-        assert!(enc.len() <= s.len(), "Huffman encoding should compress or be near size");
+        assert!(
+            enc.len() <= s.len(),
+            "Huffman encoding should compress or be near size"
+        );
         let dec = decode_huffman(&enc).expect("Decoded bytes must succeed");
         assert_eq!(String::from_utf8(dec).unwrap(), s);
     }
@@ -154,7 +160,8 @@ fn test_har_export_generation() {
         7,
         Direction::Egress,
         "curl".into(),
-        b"GET /api/v2/stats HTTP/1.1\r\nHost: metrics.internal\r\nAccept: application/json\r\n\r\n".to_vec(),
+        b"GET /api/v2/stats HTTP/1.1\r\nHost: metrics.internal\r\nAccept: application/json\r\n\r\n"
+            .to_vec(),
         Some(100),
     );
 
@@ -174,6 +181,9 @@ fn test_har_export_generation() {
     assert_eq!(har.log.creator.name, "nullca");
     assert_eq!(har.log.entries.len(), 1);
     assert_eq!(har.log.entries[0].request.method, "GET");
-    assert_eq!(har.log.entries[0].request.url, "https://metrics.internal/api/v2/stats");
+    assert_eq!(
+        har.log.entries[0].request.url,
+        "https://metrics.internal/api/v2/stats"
+    );
     assert_eq!(har.log.entries[0].response.status, 200);
 }

@@ -168,6 +168,23 @@ impl WebSocketParser {
             }
         }
 
+        // RFC 7692: permessage-deflate transparent decompression
+        if rsv1
+            && (opcode == WebSocketOpcode::Text
+                || opcode == WebSocketOpcode::Binary
+                || opcode == WebSocketOpcode::Continuation)
+        {
+            let mut deflate_buf = unmasked.clone();
+            deflate_buf.extend_from_slice(&[0x00, 0x00, 0xff, 0xff]);
+            if let Ok(decompressed) =
+                crate::proto::compression::Decompressor::decompress_deflate(&deflate_buf)
+            {
+                if !decompressed.is_empty() {
+                    unmasked = decompressed;
+                }
+            }
+        }
+
         let total_consumed = offset + payload_len;
 
         let (text_preview, is_json) = if opcode == WebSocketOpcode::Text
@@ -240,7 +257,14 @@ impl WebSocketParser {
 
         // Must not be HTTP/1.x ASCII verbs
         let http_verbs: [&[u8]; 9] = [
-            b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ",
+            b"GET ",
+            b"POST ",
+            b"PUT ",
+            b"DELETE ",
+            b"HEAD ",
+            b"OPTIONS ",
+            b"PATCH ",
+            b"CONNECT ",
             b"HTTP/1.",
         ];
         if http_verbs.iter().any(|verb| data.starts_with(verb)) {
@@ -277,7 +301,9 @@ impl WebSocketParser {
         // Try parsing the frame
         if let Some((frame, consumed)) = Self::parse_frame(data) {
             // Either the whole slice is consumed, or the remainder starts another valid frame
-            if consumed == data.len() || (data.len() > consumed && Self::parse_frame(&data[consumed..]).is_some()) {
+            if consumed == data.len()
+                || (data.len() > consumed && Self::parse_frame(&data[consumed..]).is_some())
+            {
                 return true;
             }
             // Even if slightly fragmented at the boundary, a valid frame parsed at start is strong indication
@@ -423,8 +449,49 @@ mod tests {
             text_preview: Some("World!".to_string()),
             is_json: false,
         };
-        let (opcode, complete) = assembler.process_frame(f2).expect("Should complete message");
+        let (opcode, complete) = assembler
+            .process_frame(f2)
+            .expect("Should complete message");
         assert_eq!(opcode, WebSocketOpcode::Text);
         assert_eq!(complete, b"Hello World!");
+    }
+
+    #[test]
+    fn test_rfc7692_permessage_deflate_decompression() {
+        use std::io::Write;
+        let plaintext = b"WebSocket permessage-deflate works transparently in NullCA!";
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::DeflateEncoder::new(&mut compressed, flate2::Compression::default());
+            encoder.write_all(plaintext).unwrap();
+        }
+
+        // In RFC 7692, the 0x00 0x00 0xff 0xff tail is removed if present
+        if compressed.ends_with(&[0x00, 0x00, 0xff, 0xff]) {
+            compressed.truncate(compressed.len() - 4);
+        }
+
+        // Frame header: FIN=1, RSV1=1 (0b11000001 = 0xC1), Masked=0, Len=compressed.len()
+        let mut raw_frame = vec![0xC1];
+        if compressed.len() <= 125 {
+            raw_frame.push(compressed.len() as u8);
+        } else {
+            raw_frame.push(126);
+            raw_frame.extend_from_slice(&(compressed.len() as u16).to_be_bytes());
+        }
+        raw_frame.extend_from_slice(&compressed);
+
+        let (frame, consumed) = WebSocketParser::parse_frame(&raw_frame)
+            .expect("Should parse permessage-deflate frame");
+        assert_eq!(consumed, raw_frame.len());
+        assert!(frame.fin);
+        assert!(frame.rsv1);
+        assert_eq!(frame.opcode, WebSocketOpcode::Text);
+        assert_eq!(frame.payload, plaintext);
+        assert_eq!(
+            frame.text_preview.as_deref(),
+            Some(std::str::from_utf8(plaintext).unwrap())
+        );
     }
 }

@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use colored::*;
 use nullca::bpf::loader::BpfLoader;
+use nullca::engine::audit::SecurityAuditor;
 use nullca::engine::diff::DiffEngine;
 use nullca::engine::discover::ProcessScanner;
 use nullca::engine::filter::FilterEngine;
@@ -10,13 +11,12 @@ use nullca::engine::replay::{ReplayEngine, ReplayRequest};
 use nullca::engine::spawn::ProcessLauncher;
 use nullca::engine::symbols::ElfBinary;
 use nullca::export::har::HarExporter;
-use nullca::export::pcapng::PcapNgWriter;
-use nullca::export::terminal::TerminalFormatter;
-use nullca::engine::audit::SecurityAuditor;
 use nullca::export::openapi::OpenApiGenerator;
+use nullca::export::pcapng::PcapNgWriter;
 use nullca::export::sslkeylog::SslKeyLogWriter;
+use nullca::export::terminal::TerminalFormatter;
 use nullca::proto::secrets::scan_secrets;
-use nullca::ui::dashboard::run_dashboard;
+use nullca::ui::dashboard::{run_dashboard, run_dashboard_with_drops};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -260,6 +260,33 @@ enum Commands {
         #[arg(short, long, default_value_t = 8080)]
         port: u16,
     },
+
+    /// Active parameter fuzzing and mutation testing against target endpoint
+    Fuzz {
+        /// Target host and port (e.g. 127.0.0.1:8080 or example.com:80)
+        #[arg(short, long)]
+        target: String,
+
+        /// HTTP method (GET, POST, PUT, DELETE, etc.)
+        #[arg(short, long, default_value = "GET")]
+        method: String,
+
+        /// Request URI path with query string (e.g. /api/user?id=1)
+        #[arg(short, long, default_value = "/")]
+        path: String,
+
+        /// Parameter name to mutate
+        #[arg(short = 'P', long)]
+        param: String,
+
+        /// Custom wordlist file path (one payload per line)
+        #[arg(short, long)]
+        wordlist: Option<PathBuf>,
+
+        /// Output results as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -268,11 +295,17 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::List => {
-            println!("{}", "=== NullCA Active TLS Process Scanner ===".bold().cyan());
+            println!(
+                "{}",
+                "=== NullCA Active TLS Process Scanner ===".bold().cyan()
+            );
             let targets = ProcessScanner::list_active_targets()?;
 
             if targets.is_empty() {
-                println!("{}", "No active processes linked with OpenSSL/Go TLS detected.".yellow());
+                println!(
+                    "{}",
+                    "No active processes linked with OpenSSL/Go TLS detected.".yellow()
+                );
                 return Ok(());
             }
 
@@ -340,8 +373,9 @@ async fn main() -> anyhow::Result<()> {
 
             let req = if let Some(raw_path) = raw_file {
                 let bytes = std::fs::read(&raw_path)?;
-                ReplayRequest::from_raw(host.clone(), port, &bytes)
-                    .ok_or_else(|| anyhow::anyhow!("Failed to parse raw HTTP request from {:?}", raw_path))?
+                ReplayRequest::from_raw(host.clone(), port, &bytes).ok_or_else(|| {
+                    anyhow::anyhow!("Failed to parse raw HTTP request from {:?}", raw_path)
+                })?
             } else {
                 let mut header_map = HashMap::new();
                 for h in headers {
@@ -410,6 +444,124 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Fuzz {
+            target,
+            method,
+            path,
+            param,
+            wordlist,
+            json,
+        } => {
+            let (host, port) = if let Some((h, p)) = target.split_once(':') {
+                let parsed_p = p.parse::<u16>().unwrap_or(80);
+                (h.to_string(), parsed_p)
+            } else {
+                (target.clone(), 80)
+            };
+
+            let base_req = ReplayRequest::new(host, port, method.to_uppercase(), path);
+
+            let mut payloads: Vec<nullca::engine::fuzz::FuzzPayload> = Vec::new();
+            if let Some(wpath) = wordlist {
+                let content = std::fs::read_to_string(&wpath)?;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        payloads.push(nullca::engine::fuzz::FuzzPayload::Custom(
+                            trimmed.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                payloads.extend_from_slice(nullca::engine::fuzz::DEFAULT_FUZZ_DICTIONARY);
+            }
+
+            if !json {
+                println!(
+                    "{}",
+                    "=== NullCA High-Throughput Request Fuzzing Engine ==="
+                        .bold()
+                        .cyan()
+                );
+                println!(
+                    "Target:    {}:{}",
+                    base_req.host.green(),
+                    base_req.port.to_string().yellow()
+                );
+                println!("Parameter: {}", param.bold().yellow());
+                println!(
+                    "Payloads:  {} mutations queued\n",
+                    payloads.len().to_string().cyan()
+                );
+                println!(
+                    "{:<30} {:<10} {:<12} {:<12} {}",
+                    "PAYLOAD".bold(),
+                    "STATUS".bold(),
+                    "BODY LEN".bold(),
+                    "LATENCY".bold(),
+                    "ANOMALY".bold()
+                );
+                println!("{}", "─".repeat(80).dimmed());
+            }
+
+            let results =
+                nullca::engine::fuzz::FuzzEngine::fuzz_parameter(&base_req, &param, &payloads)
+                    .await?;
+
+            if json {
+                #[derive(serde::Serialize)]
+                struct JsonFuzzOutput {
+                    payload: String,
+                    status_code: u16,
+                    body_len: usize,
+                    duration_ms: f64,
+                    is_anomaly: bool,
+                }
+                let json_res: Vec<JsonFuzzOutput> = results
+                    .into_iter()
+                    .map(|r| JsonFuzzOutput {
+                        payload: r.payload,
+                        status_code: r.status_code,
+                        body_len: r.body_len,
+                        duration_ms: r.duration_ms,
+                        is_anomaly: r.is_anomaly,
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&json_res)?);
+            } else {
+                for r in results {
+                    let status_colored = if r.status_code >= 500 {
+                        r.status_code.to_string().red().bold()
+                    } else if r.status_code >= 400 {
+                        r.status_code.to_string().yellow()
+                    } else {
+                        r.status_code.to_string().green()
+                    };
+
+                    let anomaly_badge = if r.is_anomaly {
+                        "🚨 ANOMALY".red().bold()
+                    } else {
+                        "-".dimmed()
+                    };
+
+                    let truncated_payload = if r.payload.len() > 28 {
+                        format!("{}...", &r.payload[..25])
+                    } else {
+                        r.payload
+                    };
+
+                    println!(
+                        "{:<30} {:<10} {:<12} {:<12.1} {}",
+                        truncated_payload,
+                        status_colored,
+                        format!("{} B", r.body_len),
+                        format!("{:.1}ms", r.duration_ms),
+                        anomaly_badge
+                    );
+                }
+            }
+        }
+
         Commands::Diff { file_a, file_b } => {
             let str_a = std::fs::read_to_string(&file_a)?;
             let str_b = std::fs::read_to_string(&file_b)?;
@@ -440,20 +592,53 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::InspectCert { path } => {
             if path.is_dir() {
-                println!("{} Scanning certificate directory: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+                println!(
+                    "{} Scanning certificate directory: {}",
+                    "[*]".bold().blue(),
+                    path.display().to_string().cyan()
+                );
                 let summary = nullca::proto::x509::X509Parser::scan_directory(&path)?;
 
-                println!("\n{}", "=== X.509 Cryptographic Inventory Summary ===".bold().cyan());
+                println!(
+                    "\n{}",
+                    "=== X.509 Cryptographic Inventory Summary ==="
+                        .bold()
+                        .cyan()
+                );
                 println!("{:<28} {}", "Directory Scanned:".bold(), path.display());
-                println!("{:<28} {}", "Files Scanned:".bold(), summary.total_files_scanned);
-                println!("{:<28} {} (errors: {})", "Certificates Parsed:".bold(), summary.total_certs_parsed.to_string().green().bold(), summary.parse_errors);
-                println!("{:<28} {} CAs / {} End-Entities", "Certificate Roles:".bold(), summary.ca_count.to_string().yellow(), summary.leaf_count);
-                println!("{:<28} {} Valid / {} Expired", "Validity Status:".bold(), summary.valid_count.to_string().green(), summary.expired_count.to_string().red());
+                println!(
+                    "{:<28} {}",
+                    "Files Scanned:".bold(),
+                    summary.total_files_scanned
+                );
+                println!(
+                    "{:<28} {} (errors: {})",
+                    "Certificates Parsed:".bold(),
+                    summary.total_certs_parsed.to_string().green().bold(),
+                    summary.parse_errors
+                );
+                println!(
+                    "{:<28} {} CAs / {} End-Entities",
+                    "Certificate Roles:".bold(),
+                    summary.ca_count.to_string().yellow(),
+                    summary.leaf_count
+                );
+                println!(
+                    "{:<28} {} Valid / {} Expired",
+                    "Validity Status:".bold(),
+                    summary.valid_count.to_string().green(),
+                    summary.expired_count.to_string().red()
+                );
 
                 println!("\n{}", "[Public Key Algorithms]".bold().yellow());
                 for (algo, count) in &summary.algorithm_counts {
                     let pct = (*count as f64 / summary.total_certs_parsed as f64) * 100.0;
-                    println!("  • {:<36} {:>4} ({:.1}%)", algo.cyan(), count.to_string().bold(), pct);
+                    println!(
+                        "  • {:<36} {:>4} ({:.1}%)",
+                        algo.cyan(),
+                        count.to_string().bold(),
+                        pct
+                    );
                 }
 
                 println!("\n{}", "[Signature Suites]".bold().yellow());
@@ -463,32 +648,75 @@ async fn main() -> anyhow::Result<()> {
 
                 if summary.expired_count > 0 {
                     println!("\n{}", "[Expired Certificates]".bold().red());
-                    for cert in summary.certificates.iter().filter(|c| c.validity_status.starts_with("EXPIRED")) {
-                        println!("  ⚠️  {:<30} Status: {}", cert.subject_cn.as_deref().unwrap_or("Unknown").yellow(), cert.validity_status.red());
+                    for cert in summary
+                        .certificates
+                        .iter()
+                        .filter(|c| c.validity_status.starts_with("EXPIRED"))
+                    {
+                        println!(
+                            "  ⚠️  {:<30} Status: {}",
+                            cert.subject_cn.as_deref().unwrap_or("Unknown").yellow(),
+                            cert.validity_status.red()
+                        );
                     }
                 }
             } else if path.is_file() {
-                println!("{} Inspecting file: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+                println!(
+                    "{} Inspecting file: {}",
+                    "[*]".bold().blue(),
+                    path.display().to_string().cyan()
+                );
                 let bytes = std::fs::read(&path)?;
 
                 // Check for Certificate Revocation List (CRL)
                 if let Some(crl) = nullca::proto::x509::X509Parser::parse_crl(&bytes) {
-                    println!("\n{}", "=== X.509 Certificate Revocation List (CRL) ===".bold().magenta());
+                    println!(
+                        "\n{}",
+                        "=== X.509 Certificate Revocation List (CRL) ==="
+                            .bold()
+                            .magenta()
+                    );
                     println!("{:<26} {}", "Version:".bold(), crl.version);
                     println!("{:<26} {}", "Issuer DN:".bold(), crl.issuer_dn.yellow());
-                    println!("{:<26} {}", "Signature Algorithm:".bold(), crl.signature_algorithm);
-                    println!("{:<26} {}", "This Update:".bold(), crl.this_update.as_deref().unwrap_or("?"));
-                    println!("{:<26} {}", "Next Update:".bold(), crl.next_update.as_deref().unwrap_or("None"));
+                    println!(
+                        "{:<26} {}",
+                        "Signature Algorithm:".bold(),
+                        crl.signature_algorithm
+                    );
+                    println!(
+                        "{:<26} {}",
+                        "This Update:".bold(),
+                        crl.this_update.as_deref().unwrap_or("?")
+                    );
+                    println!(
+                        "{:<26} {}",
+                        "Next Update:".bold(),
+                        crl.next_update.as_deref().unwrap_or("None")
+                    );
                     if let Some(ref num) = crl.crl_number {
                         println!("{:<26} {}", "CRL Number:".bold(), num);
                     }
-                    println!("{:<26} {}", "Revoked Certificates:".bold(), crl.revoked_count.to_string().red().bold());
+                    println!(
+                        "{:<26} {}",
+                        "Revoked Certificates:".bold(),
+                        crl.revoked_count.to_string().red().bold()
+                    );
 
                     if !crl.revoked_certificates.is_empty() {
-                        println!("\n{:<20} {:<24} {}", "Serial Number".bold(), "Revocation Date".bold(), "Reason".bold());
+                        println!(
+                            "\n{:<20} {:<24} {}",
+                            "Serial Number".bold(),
+                            "Revocation Date".bold(),
+                            "Reason".bold()
+                        );
                         println!("{}", "─".repeat(65).dimmed());
                         for r in &crl.revoked_certificates {
-                            println!("{:<20} {:<24} {}", r.serial_hex.red(), r.revocation_date, r.reason.as_deref().unwrap_or("Unspecified").dimmed());
+                            println!(
+                                "{:<20} {:<24} {}",
+                                r.serial_hex.red(),
+                                r.revocation_date,
+                                r.reason.as_deref().unwrap_or("Unspecified").dimmed()
+                            );
                         }
                     }
                     return Ok(());
@@ -498,20 +726,40 @@ async fn main() -> anyhow::Result<()> {
                 let text_sample = String::from_utf8_lossy(&bytes[..bytes.len().min(128)]);
                 if text_sample.contains("CERTIFICATE REQUEST") {
                     if let Some(csr) = nullca::proto::x509::X509Parser::parse_csr(&bytes) {
-                        println!("\n{}", "=== X.509 Certificate Signing Request (CSR / PKCS#10) ===".bold().cyan());
+                        println!(
+                            "\n{}",
+                            "=== X.509 Certificate Signing Request (CSR / PKCS#10) ==="
+                                .bold()
+                                .cyan()
+                        );
                         println!("{:<26} {}", "Version:".bold(), csr.version);
-                        println!("{:<26} {}", "Subject DN:".bold(), csr.subject_dn.green().bold());
+                        println!(
+                            "{:<26} {}",
+                            "Subject DN:".bold(),
+                            csr.subject_dn.green().bold()
+                        );
                         if let Some(ref cn) = csr.subject_cn {
                             println!("{:<26} {}", "  Common Name (CN):".dimmed(), cn);
                         }
                         if let Some(ref org) = csr.subject_org {
                             println!("{:<26} {}", "  Organization (O):".dimmed(), org);
                         }
-                        println!("{:<26} {}", "Public Key Algorithm:".bold(), csr.public_key_algorithm.cyan().bold());
-                        println!("{:<26} {}", "Signature Algorithm:".bold(), csr.signature_algorithm);
+                        println!(
+                            "{:<26} {}",
+                            "Public Key Algorithm:".bold(),
+                            csr.public_key_algorithm.cyan().bold()
+                        );
+                        println!(
+                            "{:<26} {}",
+                            "Signature Algorithm:".bold(),
+                            csr.signature_algorithm
+                        );
 
                         if !csr.requested_san_names.is_empty() {
-                            println!("\nRequested SAN Extensions ({} SANs):", csr.requested_san_names.len());
+                            println!(
+                                "\nRequested SAN Extensions ({} SANs):",
+                                csr.requested_san_names.len()
+                            );
                             for san in &csr.requested_san_names {
                                 println!("  • {}", san.cyan());
                             }
@@ -523,19 +771,34 @@ async fn main() -> anyhow::Result<()> {
                 // Standard X.509 Certificates / Chains / Bundles
                 let certs = nullca::proto::x509::X509Parser::parse_all(&bytes);
                 if certs.is_empty() {
-                    return Err(anyhow::anyhow!("Failed to parse valid X.509 ASN.1 DER/PEM certificate from {:?}", path));
+                    return Err(anyhow::anyhow!(
+                        "Failed to parse valid X.509 ASN.1 DER/PEM certificate from {:?}",
+                        path
+                    ));
                 }
 
                 print_certificate_chain(&certs);
             } else {
                 let target_str = path.to_string_lossy().to_string();
                 if target_str.contains('.') || target_str.contains(':') {
-                    println!("{} Resolving & connecting to live TLS target: {}", "[*]".bold().blue(), target_str.cyan().bold());
-                    let certs = nullca::proto::x509::X509Parser::fetch_remote_certificates(&target_str)?;
-                    println!("{} Retrieved {} live certificate(s) in peer chain", "[+]".bold().green(), certs.len().to_string().bold());
+                    println!(
+                        "{} Resolving & connecting to live TLS target: {}",
+                        "[*]".bold().blue(),
+                        target_str.cyan().bold()
+                    );
+                    let certs =
+                        nullca::proto::x509::X509Parser::fetch_remote_certificates(&target_str)?;
+                    println!(
+                        "{} Retrieved {} live certificate(s) in peer chain",
+                        "[+]".bold().green(),
+                        certs.len().to_string().bold()
+                    );
                     print_certificate_chain(&certs);
                 } else {
-                    return Err(anyhow::anyhow!("File or remote target not found: {:?}", path));
+                    return Err(anyhow::anyhow!(
+                        "File or remote target not found: {:?}",
+                        path
+                    ));
                 }
             }
         }
@@ -546,7 +809,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::ScanSecrets { path } => {
-            println!("{} Scanning for secrets in: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            println!(
+                "{} Scanning for secrets in: {}",
+                "[*]".bold().blue(),
+                path.display().to_string().cyan()
+            );
             let bytes = std::fs::read(&path)?;
             let secrets = scan_secrets(&bytes);
 
@@ -555,7 +822,11 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            println!("\n{} Detected {} sensitive token(s):", "[!]".bold().red(), secrets.len());
+            println!(
+                "\n{} Detected {} sensitive token(s):",
+                "[!]".bold().red(),
+                secrets.len()
+            );
             for (i, sec) in secrets.iter().enumerate() {
                 println!(
                     "\n[{}] {} ({})",
@@ -596,14 +867,20 @@ async fn main() -> anyhow::Result<()> {
             });
 
             let ipc_server = if let Some(ref s_path) = socket {
-                println!("{} Starting IPC broadcast socket at: {}", "[+]".bold().green(), s_path.display().to_string().cyan());
+                println!(
+                    "{} Starting IPC broadcast socket at: {}",
+                    "[+]".bold().green(),
+                    s_path.display().to_string().cyan()
+                );
                 Some(IpcServer::start(s_path)?)
             } else {
                 None
             };
 
             if ui {
-                run_dashboard(rx, ipc_server).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                run_dashboard(rx, ipc_server)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 return Ok(());
             }
 
@@ -638,11 +915,19 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::InspectElf { path, query } => {
-            println!("{} Parsing ELF binary: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            println!(
+                "{} Parsing ELF binary: {}",
+                "[*]".bold().blue(),
+                path.display().to_string().cyan()
+            );
             let elf = ElfBinary::parse(&path)?;
 
             let symbols = elf.symbols();
-            println!("{} Total symbols indexed: {}", "[+]".bold().green(), symbols.len());
+            println!(
+                "{} Total symbols indexed: {}",
+                "[+]".bold().green(),
+                symbols.len()
+            );
 
             let filtered: Vec<_> = if let Some(ref q) = query {
                 symbols.iter().filter(|s| s.name.contains(q)).collect()
@@ -650,7 +935,13 @@ async fn main() -> anyhow::Result<()> {
                 symbols.iter().take(25).collect()
             };
 
-            println!("\n{:<18} {:<10} {:<10} {}", "OFFSET".bold(), "SIZE".bold(), "TYPE".bold(), "SYMBOL NAME".bold());
+            println!(
+                "\n{:<18} {:<10} {:<10} {}",
+                "OFFSET".bold(),
+                "SIZE".bold(),
+                "TYPE".bold(),
+                "SYMBOL NAME".bold()
+            );
             println!("{}", "─".repeat(70).dimmed());
             for sym in filtered {
                 let kind = if sym.is_function { "FUNC" } else { "OBJECT" };
@@ -665,7 +956,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::InspectGo { path } => {
-            println!("{} Dissecting Go Runtime pclntab: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            println!(
+                "{} Dissecting Go Runtime pclntab: {}",
+                "[*]".bold().blue(),
+                path.display().to_string().cyan()
+            );
             let bytes = std::fs::read(&path)?;
             let go_symbols = GoSymbolTable::parse(&bytes)?;
 
@@ -698,13 +993,21 @@ async fn main() -> anyhow::Result<()> {
                         func.entry_pc
                     );
                 } else {
-                    println!("  {:<32} {}", target.yellow(), "Not linked or stripped".dimmed());
+                    println!(
+                        "  {:<32} {}",
+                        target.yellow(),
+                        "Not linked or stripped".dimmed()
+                    );
                 }
             }
         }
 
         Commands::EvalFilter { query } => {
-            println!("{} Parsing Filter DSL Query: {}", "[*]".bold().blue(), query.cyan());
+            println!(
+                "{} Parsing Filter DSL Query: {}",
+                "[*]".bold().blue(),
+                query.cyan()
+            );
             match FilterEngine::compile(&query) {
                 Ok(engine) => {
                     println!("{}", "[+] Compilation successful!".bold().green());
@@ -725,16 +1028,33 @@ async fn main() -> anyhow::Result<()> {
             );
 
             if !BpfLoader::has_clang_installed() {
-                eprintln!("{}", "[-] clang compiler not found on PATH. Install clang 12+.".bold().red());
+                eprintln!(
+                    "{}",
+                    "[-] clang compiler not found on PATH. Install clang 12+."
+                        .bold()
+                        .red()
+                );
                 return Ok(());
             }
 
             BpfLoader::compile_bpf_program(&source, &output)?;
-            println!("{}", "[+] eBPF bytecode compilation successful!".bold().green());
+            println!(
+                "{}",
+                "[+] eBPF bytecode compilation successful!".bold().green()
+            );
         }
 
-        Commands::ExportOpenapi { har, output, title, version } => {
-            println!("{} Loading HAR capture: {}", "[*]".bold().blue(), har.display().to_string().cyan());
+        Commands::ExportOpenapi {
+            har,
+            output,
+            title,
+            version,
+        } => {
+            println!(
+                "{} Loading HAR capture: {}",
+                "[*]".bold().blue(),
+                har.display().to_string().cyan()
+            );
             let file = std::fs::File::open(&har)?;
             let har_data: nullca::export::har::HarRoot = serde_json::from_reader(file)?;
 
@@ -769,7 +1089,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::ExportSslkeylog { output } => {
-            println!("{} Initializing NSS SSLKEYLOGFILE writer at: {}", "[*]".bold().blue(), output.display().to_string().cyan());
+            println!(
+                "{} Initializing NSS SSLKEYLOGFILE writer at: {}",
+                "[*]".bold().blue(),
+                output.display().to_string().cyan()
+            );
             let _writer = SslKeyLogWriter::open_append(&output)?;
             println!(
                 "{} SSLKEYLOGFILE writer ready. Point Wireshark to this file: Edit -> Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename",
@@ -821,6 +1145,7 @@ async fn main() -> anyhow::Result<()> {
 
             let (tx, mut rx) = mpsc::channel(256);
             let loader = BpfLoader::new(pid);
+            let drop_counter = loader.drop_counter();
 
             let emul = emulate || !BpfLoader::has_bpf_capabilities();
 
@@ -831,14 +1156,20 @@ async fn main() -> anyhow::Result<()> {
             });
 
             let ipc_server = if let Some(ref s_path) = socket {
-                println!("{} Starting IPC broadcast socket at: {}", "[+]".bold().green(), s_path.display().to_string().cyan());
+                println!(
+                    "{} Starting IPC broadcast socket at: {}",
+                    "[+]".bold().green(),
+                    s_path.display().to_string().cyan()
+                );
                 Some(IpcServer::start(s_path)?)
             } else {
                 None
             };
 
             if ui {
-                run_dashboard(rx, ipc_server).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                run_dashboard_with_drops(rx, ipc_server, Some(drop_counter))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?;
                 return Ok(());
             }
 
@@ -870,7 +1201,10 @@ async fn main() -> anyhow::Result<()> {
 
             let mut captured_events = Vec::new();
             let mut formatter = TerminalFormatter::new(hexdump);
-            println!("{} Listening for decrypted TLS events...\n", "[*]".bold().blue());
+            println!(
+                "{} Listening for decrypted TLS events...\n",
+                "[*]".bold().blue()
+            );
 
             while let Some(event) = rx.recv().await {
                 if let Some(ref f_engine) = filter_engine {
@@ -916,7 +1250,11 @@ fn print_certificate_chain(certs: &[nullca::proto::x509::X509CertificateInfo]) {
         println!("\n{}", "=== X.509 Certificate Dissection ===".bold().cyan());
         println!("{:<26} {}", "Version:".bold(), cert.version);
         println!("{:<26} {}", "Serial Number:".bold(), cert.serial_number_hex);
-        println!("{:<26} {}", "Subject DN:".bold(), cert.subject_dn.green().bold());
+        println!(
+            "{:<26} {}",
+            "Subject DN:".bold(),
+            cert.subject_dn.green().bold()
+        );
         if let Some(ref cn) = cert.subject_cn {
             println!("{:<26} {}", "  Common Name (CN):".dimmed(), cn);
         }
@@ -931,26 +1269,56 @@ fn print_certificate_chain(certs: &[nullca::proto::x509::X509CertificateInfo]) {
         }
 
         println!("{:<26} {}", "Issuer DN:".bold(), cert.issuer_dn.yellow());
-        println!("{:<26} {}", "Public Key Algorithm:".bold(), cert.public_key_algorithm.cyan().bold());
-        println!("{:<26} {}", "Signature Algorithm:".bold(), cert.signature_algorithm);
-        println!("{:<26} {} -> {}", "Validity Period:".bold(), cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"));
+        println!(
+            "{:<26} {}",
+            "Public Key Algorithm:".bold(),
+            cert.public_key_algorithm.cyan().bold()
+        );
+        println!(
+            "{:<26} {}",
+            "Signature Algorithm:".bold(),
+            cert.signature_algorithm
+        );
+        println!(
+            "{:<26} {} -> {}",
+            "Validity Period:".bold(),
+            cert.not_before.as_deref().unwrap_or("?"),
+            cert.not_after.as_deref().unwrap_or("?")
+        );
         let status_colored = if cert.validity_status.starts_with("EXPIRED") {
             cert.validity_status.red().bold()
         } else {
             cert.validity_status.green().bold()
         };
         println!("{:<26} {}", "Validity Status:".bold(), status_colored);
-        println!("{:<26} {}", "Basic Constraints:".bold(), if cert.is_ca { format!("CA: TRUE (PathLen: {:?})", cert.path_length_constraint).yellow().bold() } else { "End-Entity (Leaf)".normal() });
+        println!(
+            "{:<26} {}",
+            "Basic Constraints:".bold(),
+            if cert.is_ca {
+                format!("CA: TRUE (PathLen: {:?})", cert.path_length_constraint)
+                    .yellow()
+                    .bold()
+            } else {
+                "End-Entity (Leaf)".normal()
+            }
+        );
 
         if !cert.key_usage.is_empty() {
             println!("{:<26} {}", "Key Usage:".bold(), cert.key_usage.join(", "));
         }
         if !cert.extended_key_usage.is_empty() {
-            println!("{:<26} {}", "Extended Key Usage:".bold(), cert.extended_key_usage.join(", "));
+            println!(
+                "{:<26} {}",
+                "Extended Key Usage:".bold(),
+                cert.extended_key_usage.join(", ")
+            );
         }
 
         if !cert.subject_alt_names.is_empty() {
-            println!("\nSubject Alternative Names ({} SANs):", cert.subject_alt_names.len());
+            println!(
+                "\nSubject Alternative Names ({} SANs):",
+                cert.subject_alt_names.len()
+            );
             println!("{}", "─".repeat(50).dimmed());
             for san in &cert.subject_alt_names {
                 println!("  • {}", san.cyan());
@@ -979,23 +1347,75 @@ fn print_certificate_chain(certs: &[nullca::proto::x509::X509CertificateInfo]) {
         }
 
         println!("\n{}", "[Cryptographic Fingerprints]".bold().yellow());
-        println!("{:<26} {}", "SHA-256 Fingerprint:".bold(), cert.fingerprint_sha256.cyan().bold());
-        println!("{:<26} {}", "SHA-1 Fingerprint:".bold(), cert.fingerprint_sha1.dimmed());
+        println!(
+            "{:<26} {}",
+            "SHA-256 Fingerprint:".bold(),
+            cert.fingerprint_sha256.cyan().bold()
+        );
+        println!(
+            "{:<26} {}",
+            "SHA-1 Fingerprint:".bold(),
+            cert.fingerprint_sha1.dimmed()
+        );
     } else {
-        println!("\n{}", format!("=== X.509 Certificate Chain / Bundle ({} Certificates) ===", certs.len()).bold().cyan());
+        println!(
+            "\n{}",
+            format!(
+                "=== X.509 Certificate Chain / Bundle ({} Certificates) ===",
+                certs.len()
+            )
+            .bold()
+            .cyan()
+        );
         for (i, c) in certs.iter().enumerate() {
-            let role = if i == 0 { "Leaf / Server Certificate" } else if c.is_ca { "Intermediate / Root CA" } else { "Certificate" };
-            println!("\n{} [{}] {}", "──".dimmed(), format!("#{} {}", i + 1, role).bold().yellow(), "──────────────────────────────────────────────".dimmed());
+            let role = if i == 0 {
+                "Leaf / Server Certificate"
+            } else if c.is_ca {
+                "Intermediate / Root CA"
+            } else {
+                "Certificate"
+            };
+            println!(
+                "\n{} [{}] {}",
+                "──".dimmed(),
+                format!("#{} {}", i + 1, role).bold().yellow(),
+                "──────────────────────────────────────────────".dimmed()
+            );
             println!("{:<24} {}", "Subject:".bold(), c.subject_dn.green().bold());
             println!("{:<24} {}", "Issuer:".bold(), c.issuer_dn.yellow());
-            println!("{:<24} {}", "Key Algorithm:".bold(), c.public_key_algorithm.cyan().bold());
-            println!("{:<24} {}", "Signature Suite:".bold(), c.signature_algorithm);
-            println!("{:<24} {} -> {}", "Validity:".bold(), c.not_before.as_deref().unwrap_or("?"), c.not_after.as_deref().unwrap_or("?"));
-            let status_colored = if c.validity_status.starts_with("EXPIRED") { c.validity_status.red().bold() } else { c.validity_status.green().bold() };
+            println!(
+                "{:<24} {}",
+                "Key Algorithm:".bold(),
+                c.public_key_algorithm.cyan().bold()
+            );
+            println!(
+                "{:<24} {}",
+                "Signature Suite:".bold(),
+                c.signature_algorithm
+            );
+            println!(
+                "{:<24} {} -> {}",
+                "Validity:".bold(),
+                c.not_before.as_deref().unwrap_or("?"),
+                c.not_after.as_deref().unwrap_or("?")
+            );
+            let status_colored = if c.validity_status.starts_with("EXPIRED") {
+                c.validity_status.red().bold()
+            } else {
+                c.validity_status.green().bold()
+            };
             println!("{:<24} {}", "Status:".bold(), status_colored);
-            println!("{:<24} {}", "SHA-256 Fingerprint:".bold(), c.fingerprint_sha256.cyan());
+            println!(
+                "{:<24} {}",
+                "SHA-256 Fingerprint:".bold(),
+                c.fingerprint_sha256.cyan()
+            );
             if !c.subject_alt_names.is_empty() && i == 0 {
-                println!("{:<24} {}", "SANs (DNS):".bold(), c.subject_alt_names.join(", ").dimmed());
+                println!(
+                    "{:<24} {}",
+                    "SANs (DNS):".bold(),
+                    c.subject_alt_names.join(", ").dimmed()
+                );
             }
         }
     }
