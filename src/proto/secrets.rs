@@ -173,7 +173,7 @@ fn decode_jwt_payload(jwt: &str) -> Option<String> {
     let decode_part = |part: &str| -> Option<String> {
         // Pad to multiple of 4 with '='
         let mut padded = part.to_string();
-        while padded.len() % 4 != 0 {
+        while !padded.len().is_multiple_of(4) {
             padded.push('=');
         }
         let bytes = URL_SAFE_NO_PAD.decode(part).ok().or_else(|| {
@@ -203,7 +203,7 @@ fn decode_jwt_payload(jwt: &str) -> Option<String> {
 /// Decodes HTTP Basic Auth base64 string.
 fn decode_basic_auth(b64: &str) -> Option<String> {
     let mut padded = b64.to_string();
-    while padded.len() % 4 != 0 {
+    while !padded.len().is_multiple_of(4) {
         padded.push('=');
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(padded).ok()?;

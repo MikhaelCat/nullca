@@ -1,3 +1,4 @@
+pub mod database;
 pub mod grpc;
 pub mod http1;
 pub mod http2;
@@ -7,3 +8,4 @@ pub mod protobuf;
 pub mod reassembler;
 pub mod secrets;
 pub mod websocket;
+pub mod x509;

@@ -162,6 +162,12 @@ enum Commands {
         file_b: PathBuf,
     },
 
+    /// Dissect and inspect an X.509 certificate (PEM or DER binary)
+    InspectCert {
+        /// Path to certificate file (.pem, .crt, .cer, .der)
+        path: PathBuf,
+    },
+
     /// Generate shell autocompletion script (bash, zsh, fish, powershell)
     Completions {
         /// Shell type
@@ -381,6 +387,39 @@ async fn main() -> anyhow::Result<()> {
                         println!("{}", format!("  {}", d.content).dimmed());
                     }
                     _ => {}
+                }
+            }
+        }
+
+        Commands::InspectCert { path } => {
+            println!("{} Parsing X.509 Certificate: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            let bytes = std::fs::read(&path)?;
+            let cert = nullca::proto::x509::X509Parser::parse(&bytes)
+                .ok_or_else(|| anyhow::anyhow!("Failed to parse valid X.509 ASN.1 DER/PEM certificate from {:?}", path))?;
+
+            println!("\n{}", "=== X.509 Certificate Metadata ===".bold().cyan());
+            println!("{:<24} {}", "Subject CN:".bold(), cert.subject_cn.as_deref().unwrap_or("N/A").green().bold());
+            if let Some(ref org) = cert.subject_org {
+                println!("{:<24} {}", "Subject Org:".bold(), org);
+            }
+            if let Some(ref country) = cert.subject_country {
+                println!("{:<24} {}", "Subject Country:".bold(), country);
+            }
+            println!("{:<24} {}", "Issuer CN:".bold(), cert.issuer_cn.as_deref().unwrap_or("N/A").yellow());
+            if let Some(ref org) = cert.issuer_org {
+                println!("{:<24} {}", "Issuer Org:".bold(), org);
+            }
+            println!("{:<24} {} -> {}", "Validity:".bold(), cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"));
+            println!("{:<24} {}", "Public Key Algorithm:".bold(), cert.public_key_algorithm);
+            println!("{:<24} {}", "Signature Algorithm:".bold(), cert.signature_algorithm);
+            println!("{:<24} {}", "Serial Number:".bold(), cert.serial_number_hex);
+            println!("{:<24} {}", "SHA-256 Fingerprint:".bold(), cert.fingerprint_sha256.cyan().bold());
+
+            if !cert.subject_alt_names.is_empty() {
+                println!("\nSubject Alternative Names ({} SANs):", cert.subject_alt_names.len());
+                println!("{}", "─".repeat(50).dimmed());
+                for san in cert.subject_alt_names {
+                    println!("  • {}", san.cyan());
                 }
             }
         }

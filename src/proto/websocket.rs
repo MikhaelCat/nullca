@@ -253,6 +253,11 @@ impl WebSocketParser {
         }
 
         let b0 = data[0];
+        // RFC 6455: RSV1, RSV2, RSV3 MUST be 0 unless extension is negotiated
+        if (b0 & 0x70) != 0 {
+            return false;
+        }
+
         let opcode = b0 & 0x0F;
         // Valid RFC opcodes are 0x0..=0x2 (data) or 0x8..=0xA (control)
         let valid_opcode = opcode <= 0x2 || (0x8..=0xA).contains(&opcode);

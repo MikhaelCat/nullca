@@ -141,6 +141,37 @@ impl TerminalFormatter {
                     }
                 }
             }
+            ProtocolType::X509 => {
+                if let Some(cert) = crate::proto::x509::X509Parser::parse(&event.data) {
+                    output.push_str(&format!(
+                        "  [X.509 Certificate] Subject: CN={} | Issuer: CN={}\n",
+                        cert.subject_cn.as_deref().unwrap_or("Unknown").green(),
+                        cert.issuer_cn.as_deref().unwrap_or("Unknown").yellow()
+                    ));
+                    output.push_str(&format!(
+                        "  Validity: {} -> {} | SANs: {:?}\n",
+                        cert.not_before.as_deref().unwrap_or("?").dimmed(),
+                        cert.not_after.as_deref().unwrap_or("?").dimmed(),
+                        cert.subject_alt_names
+                    ));
+                    output.push_str(&format!("  SHA-256: {}\n", cert.fingerprint_sha256.cyan()));
+                }
+            }
+            ProtocolType::Redis => {
+                if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&event.data) {
+                    output.push_str(&format!("  [Redis Command] {} {}\n", cmd.command.red().bold(), cmd.args.join(" ").white()));
+                }
+            }
+            ProtocolType::Database => {
+                if let Some(query) = crate::proto::database::NonHttpDissector::parse_postgres(&event.data) {
+                    output.push_str(&format!("  [Database SQL Query] {}\n", query.blue().bold()));
+                }
+            }
+            ProtocolType::Smtp => {
+                if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&event.data) {
+                    output.push_str(&format!("  [SMTP Protocol] {}\n", line.yellow()));
+                }
+            }
             ProtocolType::RawTls => {
                 if self.show_hexdump {
                     output.push_str(&Self::hexdump(&event.data));

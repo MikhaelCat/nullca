@@ -122,68 +122,62 @@ impl HarExporter {
         for event in events {
             if event.direction == Direction::Egress {
                 // Outbound request
-                if let Some(msg) = Http1Parser::parse(&event.data) {
-                    if let Http1Message::Request {
+                if let Some(Http1Message::Request {
+                    method,
+                    uri,
+                    version,
+                    headers,
+                    body,
+                }) = Http1Parser::parse(&event.data)
+                {
+                    let host = headers.get("host").cloned().unwrap_or_else(|| "localhost".into());
+                    let full_url = if uri.starts_with("http") {
+                        uri
+                    } else {
+                        format!("https://{}{}", host, uri)
+                    };
+
+                    let har_headers = headers
+                        .into_iter()
+                        .map(|(k, v)| HarHeader { name: k, value: v })
+                        .collect();
+
+                    let post_data = if !body.is_empty() {
+                        Some(HarPostData {
+                            mime_type: "application/octet-stream".into(),
+                            text: String::from_utf8_lossy(&body).to_string(),
+                        })
+                    } else {
+                        None
+                    };
+
+                    let body_len = body.len() as i64;
+                    let har_req = HarRequest {
                         method,
-                        uri,
-                        version,
-                        headers,
-                        body,
-                    } = msg
-                    {
-                        let host = headers.get("host").cloned().unwrap_or_else(|| "localhost".into());
-                        let full_url = if uri.starts_with("http") {
-                            uri
-                        } else {
-                            format!("https://{}{}", host, uri)
-                        };
+                        url: full_url,
+                        http_version: version,
+                        headers: har_headers,
+                        query_string: Vec::new(),
+                        post_data,
+                        headers_size: -1,
+                        body_size: body_len,
+                    };
 
-                        let har_headers = headers
-                            .into_iter()
-                            .map(|(k, v)| HarHeader { name: k, value: v })
-                            .collect();
-
-                        let post_data = if !body.is_empty() {
-                            Some(HarPostData {
-                                mime_type: "application/octet-stream".into(),
-                                text: String::from_utf8_lossy(&body).to_string(),
-                            })
-                        } else {
-                            None
-                        };
-
-                        let body_len = body.len() as i64;
-                        let har_req = HarRequest {
-                            method,
-                            url: full_url,
-                            http_version: version,
-                            headers: har_headers,
-                            query_string: Vec::new(),
-                            post_data,
-                            headers_size: -1,
-                            body_size: body_len,
-                        };
-
-                        pending_requests.insert(event.fd, (event.clone(), har_req));
-                    }
+                    pending_requests.insert(event.fd, (event.clone(), har_req));
                 }
             } else if event.direction == Direction::Ingress {
                 // Inbound response
                 if let Some((req_ev, har_req)) = pending_requests.remove(&event.fd) {
                     let (status, status_text, resp_headers, body) =
-                        if let Some(msg) = Http1Parser::parse(&event.data) {
-                            if let Http1Message::Response {
-                                status_code,
-                                reason,
-                                headers,
-                                body,
-                                ..
-                            } = msg
-                            {
-                                (status_code, reason, headers, body)
-                            } else {
-                                (200, "OK".into(), std::collections::HashMap::new(), event.data.clone())
-                            }
+                        if let Some(Http1Message::Response {
+                            status_code,
+                            reason,
+                            headers,
+                            body,
+                            ..
+                        }) = Http1Parser::parse(&event.data)
+                        {
+                            (status_code, reason, headers, body)
                         } else {
                             (200, "OK".into(), std::collections::HashMap::new(), event.data.clone())
                         };

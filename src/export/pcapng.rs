@@ -80,9 +80,7 @@ impl PcapNgWriter {
         epb.extend_from_slice(&cap_len.to_le_bytes());
         epb.extend_from_slice(&packet);
 
-        for _ in 0..pad_len {
-            epb.push(0);
-        }
+        epb.resize(epb.len() + pad_len as usize, 0);
 
         epb.extend_from_slice(&total_block_len.to_le_bytes());
 

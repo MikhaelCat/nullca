@@ -21,6 +21,10 @@ pub enum ProtocolType {
     Http2,
     Grpc,
     WebSocket,
+    X509,
+    Redis,
+    Database,
+    Smtp,
     RawTls,
 }
 
@@ -31,6 +35,10 @@ impl std::fmt::Display for ProtocolType {
             ProtocolType::Http2 => write!(f, "HTTP/2"),
             ProtocolType::Grpc => write!(f, "gRPC"),
             ProtocolType::WebSocket => write!(f, "WebSocket"),
+            ProtocolType::X509 => write!(f, "X.509-Cert"),
+            ProtocolType::Redis => write!(f, "Redis-TLS"),
+            ProtocolType::Database => write!(f, "Database-TLS"),
+            ProtocolType::Smtp => write!(f, "SMTP-TLS"),
             ProtocolType::RawTls => write!(f, "TLS-Plaintext"),
         }
     }
@@ -51,6 +59,7 @@ pub struct TlsEvent {
 }
 
 impl TlsEvent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         timestamp_ns: u64,
         pid: u32,
@@ -94,23 +103,47 @@ impl TlsEvent {
             return ProtocolType::Http1;
         }
 
+        // Check X.509 Certificate (PEM or DER sequence)
+        if slice.starts_with(b"-----BEGIN CERTIFICATE-----") {
+            return ProtocolType::X509;
+        }
+        if slice.len() > 30 && slice[0] == 0x30 && slice[1] == 0x82 && crate::proto::x509::X509Parser::parse(slice).is_some() {
+            return ProtocolType::X509;
+        }
+
+        // Check Redis TLS protocol
+        if crate::proto::database::NonHttpDissector::parse_redis(slice).is_some() {
+            return ProtocolType::Redis;
+        }
+
+        // Check PostgreSQL / Database Query
+        if crate::proto::database::NonHttpDissector::parse_postgres(slice).is_some() {
+            return ProtocolType::Database;
+        }
+
+        // Check SMTP / Mail protocol
+        if crate::proto::database::NonHttpDissector::parse_smtp(slice).is_some() {
+            return ProtocolType::Smtp;
+        }
+
+        // Check RFC 6455 WebSocket framing
+        if crate::proto::websocket::WebSocketParser::is_probable_websocket(slice) {
+            return ProtocolType::WebSocket;
+        }
+
         // Check HTTP/2 frame pattern (Length 3 bytes, Type 1 byte, Flags 1 byte, StreamID 4 bytes)
         if slice.len() >= 9 {
+            let frame_len = ((slice[0] as usize) << 16) | ((slice[1] as usize) << 8) | (slice[2] as usize);
             let frame_type = slice[3];
             let stream_id = u32::from_be_bytes([slice[5] & 0x7f, slice[6], slice[7], slice[8]]);
             // Valid HTTP/2 frame types are 0x0 to 0x9
-            if frame_type <= 0x9 && stream_id < 0x7fffffff {
+            if frame_type <= 0x9 && stream_id < 0x7fffffff && frame_len + 9 <= slice.len() {
                 // Heuristic confirmation: check if payload contains gRPC content-type
                 if slice.windows(16).any(|w| w == b"application/grpc") {
                     return ProtocolType::Grpc;
                 }
                 return ProtocolType::Http2;
             }
-        }
-
-        // Check RFC 6455 WebSocket framing
-        if crate::proto::websocket::WebSocketParser::is_probable_websocket(slice) {
-            return ProtocolType::WebSocket;
         }
 
         ProtocolType::RawTls

@@ -20,7 +20,8 @@
 [![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![eBPF](https://img.shields.io/badge/eBPF-Uprobes_&_RingBuf-blue.svg?style=flat-square&logo=linux)](https://ebpf.io/)
 [![TUI](https://img.shields.io/badge/Cockpit-Ratatui_Interactive_TUI-yellow.svg?style=flat-square)](#-interactive-terminal-cockpit)
-[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20WebSocket%20|%20gRPC-emerald.svg?style=flat-square)](#-deep-protocol-dissectors)
+[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20WebSocket%20|%20gRPC%20|%20Redis%20|%20SQL%20|%20SMTP-emerald.svg?style=flat-square)](#-deep-protocol-dissectors)
+[![Certs](https://img.shields.io/badge/Certificates-Universal_Zero--CA_%26_X.509_ASN.1-blueviolet.svg?style=flat-square)](#-universal-tls-certificate-support--x509-inspector)
 [![Secrets](https://img.shields.io/badge/Secrets-JWT_&_Token_Dissector-red.svg?style=flat-square)](#-automated-jwt--secret-credential-dissector)
 [![Diff](https://img.shields.io/badge/Diff-Side--by--Side_Engine-purple.svg?style=flat-square)](#-side-by-side--unified-packet-diff-engine)
 [![IPC](https://img.shields.io/badge/IPC-Unix_Socket_Streaming-cyan.svg?style=flat-square)](#-unix-domain-socket-ipc-streaming)
@@ -96,6 +97,29 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
   ```
 - Measures and prints DNS connect latency, Time-To-First-Byte (TTFB), total roundtrip duration, response headers, and syntax-highlighted response bodies.
 - Triggered instantly inside the Cockpit by pressing `[r]` on any selected request packet.
+
+### 📜 Universal TLS Certificate Support & X.509 Inspector
+- **Zero-CA Architecture = 100% Real-World Certificate Compatibility:**
+  - Conventional proxies (Burp Suite, mitmproxy, Charles) must generate forge certificates signed by a local Root CA. If the application uses Certificate Pinning or strict trust stores, the TLS handshake is rejected.
+  - `nullca` does **not** terminate or forge TLS sessions. It hooks userspace crypto boundaries (`SSL_read`, `SSL_write`, `crypto/tls.(*Conn).Read/Write`) **inside process memory**.
+  - As a result, **every single TLS certificate in existence works out of the box with zero configuration**:
+    - Public CAs: Let's Encrypt, DigiCert, Sectigo, Google Trust Services, Cloudflare, GlobalSign.
+    - Private & Enterprise PKI: HashiCorp Vault, Active Directory Certificate Services (AD CS), AWS Private CA.
+    - Self-signed & dev certificates: `localhost.pem`, Kubernetes internal TLS, mTLS mutual-auth certs.
+    - Pinned certificates: Mobile apps, hardened Go binaries, and embedded TLS trust anchors.
+- **Pure-Rust X.509 ASN.1 DER/PEM Dissector (`nullca inspect-cert`):**
+  - Extract cryptographic metadata directly from `.pem` or `.der` files:
+    ```bash
+    nullca inspect-cert /etc/ssl/certs/ISRG_Root_X1.pem
+    ```
+  - Dissects Subject, Issuer, Validity window, Public Key Algorithm (RSA 2048/4096, ECDSA P-256/P-384, Ed25519), Signature Algorithm, Serial Number, and calculates the SHA-256 fingerprint.
+
+### 🗄️ Non-HTTP Encrypted Protocols (Redis, SQL Database & SMTP)
+- Encrypted traffic is not limited to HTTP. `nullca` automatically detects and dissects non-HTTP protocols flowing over TLS:
+  - **Redis TLS (RESP):** Intercepts and parses Redis Serialization Protocol commands (`AUTH`, `SET`, `GET`, `PING`, `CLUSTER`, `CONFIG`) directly from encrypted Redis tunnels (`rediss://`).
+  - **Database TLS (PostgreSQL & MySQL):** Identifies encrypted database connections and extracts plaintext SQL query commands (`SELECT`, `INSERT`, `UPDATE`, `CREATE TABLE`).
+  - **SMTP Mail TLS:** Dissects STARTTLS / SMTPS mail dialogs (`HELO`, `EHLO`, `MAIL FROM:`, `RCPT TO:`, `DATA`).
+  - Tagged with dedicated colored table pills (`[REDIS]`, `[SQL]`, `[SMTP]`) in the Cockpit and formatted for instant analysis.
 
 ### 🌐 RFC 6455 WebSocket Dissector & Frame Assembler
 - Complete WebSocket protocol dissection:
@@ -358,6 +382,7 @@ Commands:
   stream        Stream live decrypted events from a background NullCA daemon socket
   replay        Replay and tamper an HTTP request against a target server with microsecond latency metrics
   diff          Compare two intercepted packets, payload dumps, or HTTP messages side-by-side
+  inspect-cert  Dissect and inspect an X.509 certificate (PEM or DER binary)
   completions   Generate shell autocompletion script (bash, zsh, fish, powershell)
   scan-secrets  Scan a file or dump for leaked JWT tokens, API keys, and CTF flags
   inspect-elf   Inspect dynamic and static symbols of an ELF binary or shared library

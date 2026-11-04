@@ -541,6 +541,10 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                 ProtocolType::Http2 => ("HTTP/2", Style::default().fg(Color::Magenta)),
                 ProtocolType::Grpc => ("gRPC", Style::default().fg(Color::LightGreen)),
                 ProtocolType::WebSocket => ("WS", Style::default().fg(Color::Cyan)),
+                ProtocolType::X509 => ("X.509", Style::default().fg(Color::Yellow)),
+                ProtocolType::Redis => ("REDIS", Style::default().fg(Color::LightRed)),
+                ProtocolType::Database => ("SQL", Style::default().fg(Color::LightBlue)),
+                ProtocolType::Smtp => ("SMTP", Style::default().fg(Color::LightYellow)),
                 ProtocolType::RawTls => ("TLS/RAW", Style::default().fg(Color::DarkGray)),
             };
 
@@ -561,20 +565,51 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             };
 
             // Construct short preview
-            let preview = if ev.protocol() == ProtocolType::WebSocket {
-                if let Some((frame, _)) = WebSocketParser::parse_frame(&ev.data) {
-                    format!("[{}] {}", frame.opcode, frame.text_preview.unwrap_or_else(|| format!("{} bytes", frame.payload_len)))
-                } else {
-                    String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+            let preview = match ev.protocol() {
+                ProtocolType::WebSocket => {
+                    if let Some((frame, _)) = WebSocketParser::parse_frame(&ev.data) {
+                        format!("[{}] {}", frame.opcode, frame.text_preview.unwrap_or_else(|| format!("{} bytes", frame.payload_len)))
+                    } else {
+                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                    }
                 }
-            } else {
-                String::from_utf8_lossy(&ev.data)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .take(60)
-                    .collect::<String>()
+                ProtocolType::X509 => {
+                    if let Some(cert) = crate::proto::x509::X509Parser::parse(&ev.data) {
+                        format!("CN={} (Issuer: {})", cert.subject_cn.as_deref().unwrap_or("Unknown"), cert.issuer_cn.as_deref().unwrap_or("Unknown"))
+                    } else {
+                        "X.509 Certificate Chain".into()
+                    }
+                }
+                ProtocolType::Redis => {
+                    if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&ev.data) {
+                        format!("{} {}", cmd.command, cmd.args.join(" "))
+                    } else {
+                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                    }
+                }
+                ProtocolType::Database => {
+                    if let Some(q) = crate::proto::database::NonHttpDissector::parse_postgres(&ev.data) {
+                        q
+                    } else {
+                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                    }
+                }
+                ProtocolType::Smtp => {
+                    if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&ev.data) {
+                        line
+                    } else {
+                        String::from_utf8_lossy(&ev.data).lines().next().unwrap_or("").to_string()
+                    }
+                }
+                _ => {
+                    String::from_utf8_lossy(&ev.data)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect::<String>()
+                }
             };
 
             let id_label = if state.diff_baseline == Some(*idx) {
@@ -718,6 +753,61 @@ fn draw_details_and_hex(f: &mut ratatui::Frame, state: &DashboardState, area: Re
                             if let Some(ref text) = f.text_preview {
                                 lines.push(Line::from(Span::styled(format!("    Payload: {}", text), Style::default().fg(Color::LightGreen))));
                             }
+                        }
+                    }
+                    ProtocolType::X509 => {
+                        if let Some(cert) = crate::proto::x509::X509Parser::parse(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- X.509 Certificate Chain Dissection ---", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+                            lines.push(Line::from(vec![
+                                Span::styled("  Subject CN: ", Style::default().fg(Color::LightCyan)),
+                                Span::styled(cert.subject_cn.unwrap_or_else(|| "N/A".into()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            ]));
+                            if let Some(ref org) = cert.subject_org {
+                                lines.push(Line::from(format!("  Subject Org: {}", org)));
+                            }
+                            lines.push(Line::from(vec![
+                                Span::styled("  Issuer CN: ", Style::default().fg(Color::Yellow)),
+                                Span::styled(cert.issuer_cn.unwrap_or_else(|| "N/A".into()), Style::default().fg(Color::White)),
+                            ]));
+                            lines.push(Line::from(format!("  Validity: {} -> {}", cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"))));
+                            lines.push(Line::from(format!("  Key Algorithm: {}", cert.public_key_algorithm)));
+                            lines.push(Line::from(format!("  Signature Algorithm: {}", cert.signature_algorithm)));
+                            lines.push(Line::from(format!("  Serial Number: {}", cert.serial_number_hex)));
+                            lines.push(Line::from(vec![
+                                Span::styled("  SHA-256 Fingerprint: ", Style::default().fg(Color::Cyan)),
+                                Span::styled(cert.fingerprint_sha256, Style::default().fg(Color::LightGreen)),
+                            ]));
+                            if !cert.subject_alt_names.is_empty() {
+                                lines.push(Line::from(Span::styled(format!("  SANs ({} hosts):", cert.subject_alt_names.len()), Style::default().fg(Color::LightBlue))));
+                                for san in cert.subject_alt_names.iter().take(6) {
+                                    lines.push(Line::from(format!("    • {}", san)));
+                                }
+                            }
+                        }
+                    }
+                    ProtocolType::Redis => {
+                        if let Some(cmd) = crate::proto::database::NonHttpDissector::parse_redis(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- Redis Protocol (RESP) Dissection ---", Style::default().fg(Color::LightRed))));
+                            lines.push(Line::from(vec![
+                                Span::styled("  Command: ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(cmd.command, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            ]));
+                            lines.push(Line::from(format!("  Arguments ({}):", cmd.args.len())));
+                            for (i, arg) in cmd.args.iter().enumerate() {
+                                lines.push(Line::from(format!("    [{}] {}", i, arg)));
+                            }
+                        }
+                    }
+                    ProtocolType::Database => {
+                        if let Some(q) = crate::proto::database::NonHttpDissector::parse_postgres(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- Database SQL Query Dissection ---", Style::default().fg(Color::LightBlue))));
+                            lines.push(Line::from(Span::styled(format!("  {}", q), Style::default().fg(Color::White).add_modifier(Modifier::BOLD))));
+                        }
+                    }
+                    ProtocolType::Smtp => {
+                        if let Some(line) = crate::proto::database::NonHttpDissector::parse_smtp(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- SMTP Mail Protocol Dissection ---", Style::default().fg(Color::LightYellow))));
+                            lines.push(Line::from(Span::styled(format!("  {}", line), Style::default().fg(Color::White))));
                         }
                     }
                     _ => {

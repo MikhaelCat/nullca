@@ -126,21 +126,19 @@ impl ReplayEngine {
             total_duration_ms,
         };
 
-        if let Some(msg) = crate::proto::http1::Http1Parser::parse(&buf) {
-            if let crate::proto::http1::Http1Message::Response {
+        if let Some(crate::proto::http1::Http1Message::Response {
+            status_code,
+            headers,
+            body,
+            ..
+        }) = crate::proto::http1::Http1Parser::parse(&buf)
+        {
+            return Ok(ReplayResponse {
                 status_code,
                 headers,
                 body,
-                ..
-            } = msg
-            {
-                return Ok(ReplayResponse {
-                    status_code,
-                    headers,
-                    body,
-                    metrics,
-                });
-            }
+                metrics,
+            });
         }
 
         Ok(ReplayResponse {

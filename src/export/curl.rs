@@ -12,27 +12,25 @@ impl CurlExporter {
     /// Generates a bash-compatible `curl` command string from raw intercepted payload.
     pub fn from_payload(data: &[u8]) -> Option<String> {
         // Try HTTP/1.1 first
-        if let Some(msg) = Http1Parser::parse(data) {
-            if let Http1Message::Request {
-                method,
-                uri,
-                headers,
-                body,
-                ..
-            } = msg
-            {
-                let host = headers
-                    .get("host")
-                    .cloned()
-                    .unwrap_or_else(|| "127.0.0.1".into());
-                let full_url = if uri.starts_with("http://") || uri.starts_with("https://") {
-                    uri
-                } else {
-                    format!("https://{}{}", host, uri)
-                };
+        if let Some(Http1Message::Request {
+            method,
+            uri,
+            headers,
+            body,
+            ..
+        }) = Http1Parser::parse(data)
+        {
+            let host = headers
+                .get("host")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".into());
+            let full_url = if uri.starts_with("http://") || uri.starts_with("https://") {
+                uri
+            } else {
+                format!("https://{}{}", host, uri)
+            };
 
-                return Some(Self::format_curl(&method, &full_url, &headers, &body));
-            }
+            return Some(Self::format_curl(&method, &full_url, &headers, &body));
         }
 
         // Try HTTP/2 frame stream
