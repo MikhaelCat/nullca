@@ -4,6 +4,9 @@
 //! - Single PEM or DER files;
 //! - Concatenated Certificate Bundles and Chains (e.g. ca-certificates.crt);
 //! - Complete system certificate directories (e.g. /etc/ssl/certs);
+//! - Live remote servers and hostnames over real-time TLS handshakes (e.g. google.com:443);
+//! - Certificate Signing Requests (CSR / PKCS#10, RFC 2986);
+//! - Certificate Revocation Lists (CRL, RFC 5280 Section 5);
 //! - Intercepted TLS handshake packets.
 //!
 //! Supports standard, rare, legacy, national, and post-quantum cryptographic suites:
@@ -59,6 +62,37 @@ pub struct CertScanSummary {
     pub algorithm_counts: BTreeMap<String, usize>,
     pub signature_counts: BTreeMap<String, usize>,
     pub certificates: Vec<X509CertificateInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct X509CsrInfo {
+    pub version: String,
+    pub subject_dn: String,
+    pub subject_cn: Option<String>,
+    pub subject_org: Option<String>,
+    pub public_key_algorithm: String,
+    pub signature_algorithm: String,
+    pub requested_san_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevokedCertEntry {
+    pub serial_hex: String,
+    pub revocation_date: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct X509CrlInfo {
+    pub version: String,
+    pub issuer_dn: String,
+    pub issuer_cn: Option<String>,
+    pub this_update: Option<String>,
+    pub next_update: Option<String>,
+    pub signature_algorithm: String,
+    pub crl_number: Option<String>,
+    pub revoked_count: usize,
+    pub revoked_certificates: Vec<RevokedCertEntry>,
 }
 
 pub struct X509Parser;
@@ -141,6 +175,41 @@ impl X509Parser {
         }
 
         results
+    }
+
+    /// Fetches live certificate chain from a remote network endpoint (e.g. google.com:443) via real-time TLS handshake.
+    pub fn fetch_remote_certificates(target: &str) -> anyhow::Result<Vec<X509CertificateInfo>> {
+        let (host, port) = if let Some((h, p)) = target.split_once(':') {
+            (h.to_string(), p.parse::<u16>().unwrap_or(443))
+        } else {
+            (target.to_string(), 443)
+        };
+
+        // Execute OpenSSL s_client to pull the exact live certificate chain without CA enforcement
+        let output = std::process::Command::new("openssl")
+            .args([
+                "s_client",
+                "-connect",
+                &format!("{}:{}", host, port),
+                "-servername",
+                &host,
+                "-showcerts",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()?;
+
+        if !output.status.success() && output.stdout.is_empty() {
+            return Err(anyhow::anyhow!("Failed to complete TLS handshake with remote target {}:{}", host, port));
+        }
+
+        let certs = Self::parse_all(&output.stdout);
+        if certs.is_empty() {
+            return Err(anyhow::anyhow!("No X.509 certificates extracted from TLS handshake with {}:{}", host, port));
+        }
+
+        Ok(certs)
     }
 
     /// Recursively scans a directory for certificate files and aggregates cryptographic statistics.
@@ -391,6 +460,245 @@ impl X509Parser {
         })
     }
 
+    /// Parses a Certificate Signing Request (CSR / PKCS#10, RFC 2986).
+    pub fn parse_csr(data: &[u8]) -> Option<X509CsrInfo> {
+        let der = if let Some(d) = Self::extract_pem_with_marker(data, "-----BEGIN CERTIFICATE REQUEST-----", "-----END CERTIFICATE REQUEST-----")
+            .or_else(|| Self::extract_pem_with_marker(data, "-----BEGIN NEW CERTIFICATE REQUEST-----", "-----END NEW CERTIFICATE REQUEST-----")) {
+            d
+        } else {
+            data.to_vec()
+        };
+
+        let (tag, content, _) = Self::read_tlv(&der)?;
+        if tag != 0x30 { return None; }
+
+        let (info_tag, info_content, sig_rem) = Self::read_tlv(content)?;
+        if info_tag != 0x30 { return None; }
+
+        let (sig_alg_tag, sig_alg_bytes, _) = Self::read_tlv(sig_rem)?;
+        let signature_algorithm = if sig_alg_tag == 0x30 {
+            Self::lookup_algorithm_name(sig_alg_bytes)
+        } else {
+            "Unknown".into()
+        };
+
+        let mut cur = info_content;
+        // Version
+        let version = if let Some((0x02, v_bytes, rem)) = Self::read_tlv(cur) {
+            cur = rem;
+            format!("v{}", if !v_bytes.is_empty() { v_bytes[0] + 1 } else { 1 })
+        } else {
+            "v1".into()
+        };
+
+        // Subject
+        let (subject_dn, subject_cn, subject_org, _) = if let Some((0x30, subj_bytes, rem)) = Self::read_tlv(cur) {
+            cur = rem;
+            Self::parse_distinguished_name(subj_bytes)
+        } else {
+            ("Unknown".into(), None, None, None)
+        };
+
+        // SubjectPublicKeyInfo
+        let public_key_algorithm = if let Some((0x30, spki_bytes, rem)) = Self::read_tlv(cur) {
+            cur = rem;
+            Self::parse_subject_public_key_info(spki_bytes)
+        } else {
+            "Unknown".into()
+        };
+
+        // Attributes (look for requested extensions / SAN)
+        let mut requested_san_names = Vec::new();
+        if let Some((attr_tag, attr_content, _)) = Self::read_tlv(cur) {
+            if (attr_tag & 0xC0) == 0x80 && (attr_tag & 0x1F) == 0 {
+                let mut attr_cur = attr_content;
+                while let Some((0x30, seq, rem)) = Self::read_tlv(attr_cur) {
+                    attr_cur = rem;
+                    let mut s = Vec::new();
+                    Self::scan_san_dns_names(seq, &mut s);
+                    requested_san_names.extend(s);
+                }
+            }
+        }
+
+        Some(X509CsrInfo {
+            version,
+            subject_dn,
+            subject_cn,
+            subject_org,
+            public_key_algorithm,
+            signature_algorithm,
+            requested_san_names,
+        })
+    }
+
+    /// Parses a Certificate Revocation List (CRL, RFC 5280 Section 5).
+    pub fn parse_crl(data: &[u8]) -> Option<X509CrlInfo> {
+        let der = if let Some(d) = Self::extract_pem_with_marker(data, "-----BEGIN X509 CRL-----", "-----END X509 CRL-----") {
+            d
+        } else {
+            data.to_vec()
+        };
+
+        let (tag, content, _) = Self::read_tlv(&der)?;
+        if tag != 0x30 { return None; }
+
+        let (tbs_tag, tbs_content, sig_rem) = Self::read_tlv(content)?;
+        if tbs_tag != 0x30 { return None; }
+
+        let (sig_alg_tag, sig_alg_bytes, _) = Self::read_tlv(sig_rem)?;
+        let signature_algorithm = if sig_alg_tag == 0x30 {
+            Self::lookup_algorithm_name(sig_alg_bytes)
+        } else {
+            "Unknown".into()
+        };
+
+        let mut tbs_cur = tbs_content;
+
+        // Optional Version
+        let version = if !tbs_cur.is_empty() && tbs_cur[0] == 0x02 {
+            if let Some((0x02, v_bytes, rem)) = Self::read_tlv(tbs_cur) {
+                tbs_cur = rem;
+                format!("v{}", if !v_bytes.is_empty() { v_bytes[0] + 1 } else { 1 })
+            } else {
+                "v1".into()
+            }
+        } else {
+            "v1".into()
+        };
+
+        // Signature Algorithm inside TBS
+        if let Some((0x30, _, rem)) = Self::read_tlv(tbs_cur) {
+            tbs_cur = rem;
+        }
+
+        // Issuer
+        let (issuer_dn, issuer_cn, _, _) = if let Some((0x30, iss_bytes, rem)) = Self::read_tlv(tbs_cur) {
+            tbs_cur = rem;
+            Self::parse_distinguished_name(iss_bytes)
+        } else {
+            ("Unknown".into(), None, None, None)
+        };
+
+        // thisUpdate
+        let this_update = if let Some((t_tag, t_bytes, rem)) = Self::read_tlv(tbs_cur) {
+            if t_tag == 0x17 || t_tag == 0x18 {
+                tbs_cur = rem;
+                Some(Self::format_asn1_time(&String::from_utf8_lossy(t_bytes)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Optional nextUpdate
+        let next_update = if !tbs_cur.is_empty() && (tbs_cur[0] == 0x17 || tbs_cur[0] == 0x18) {
+            if let Some((_, t_bytes, rem)) = Self::read_tlv(tbs_cur) {
+                tbs_cur = rem;
+                Some(Self::format_asn1_time(&String::from_utf8_lossy(t_bytes)))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Revoked certificates sequence
+        let mut revoked_certificates = Vec::new();
+        if !tbs_cur.is_empty() && tbs_cur[0] == 0x30 {
+            if let Some((0x30, rev_seq, rem)) = Self::read_tlv(tbs_cur) {
+                tbs_cur = rem;
+                let mut rev_cur = rev_seq;
+                while let Some((0x30, entry_bytes, rem_entry)) = Self::read_tlv(rev_cur) {
+                    rev_cur = rem_entry;
+                    if let Some((0x02, sn_bytes, date_rem)) = Self::read_tlv(entry_bytes) {
+                        let sn_hex = Self::hex_string(sn_bytes);
+                        let (d_tag, d_bytes, r_rem) = match Self::read_tlv(date_rem) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                        let date_str = if d_tag == 0x17 || d_tag == 0x18 {
+                            Self::format_asn1_time(&String::from_utf8_lossy(d_bytes))
+                        } else {
+                            "Unknown Date".into()
+                        };
+
+                        let reason = if let Some((0x30, ext_bytes, _)) = Self::read_tlv(r_rem) {
+                            if let Some((0x0A, enum_bytes, _)) = Self::read_tlv(ext_bytes) {
+                                match enum_bytes.first().copied().unwrap_or(0) {
+                                    1 => Some("Key Compromise".into()),
+                                    2 => Some("CA Compromise".into()),
+                                    3 => Some("Affiliation Changed".into()),
+                                    4 => Some("Superseded".into()),
+                                    5 => Some("Cessation of Operation".into()),
+                                    6 => Some("Certificate Hold".into()),
+                                    _ => Some("Unspecified".into()),
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        revoked_certificates.push(RevokedCertEntry {
+                            serial_hex: sn_hex,
+                            revocation_date: date_str,
+                            reason,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Optional crlExtensions
+        let mut crl_number = None;
+        if !tbs_cur.is_empty() && (tbs_cur[0] & 0xC0) == 0x80 {
+            if let Some((_, ext_seq, _)) = Self::read_tlv(tbs_cur) {
+                if let Some((0x30, exts, _)) = Self::read_tlv(ext_seq) {
+                    let mut ext_cur = exts;
+                    while let Some((0x30, ext_item, rem)) = Self::read_tlv(ext_cur) {
+                        ext_cur = rem;
+                        if let Some((0x06, oid, oct_rem)) = Self::read_tlv(ext_item) {
+                            if Self::decode_oid(oid) == "2.5.29.20" {
+                                if let Some((0x04, oct, _)) = Self::read_tlv(oct_rem) {
+                                    if let Some((0x02, num, _)) = Self::read_tlv(oct) {
+                                        crl_number = Some(Self::hex_string(num));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let revoked_count = revoked_certificates.len();
+
+        Some(X509CrlInfo {
+            version,
+            issuer_dn,
+            issuer_cn,
+            this_update,
+            next_update,
+            signature_algorithm,
+            crl_number,
+            revoked_count,
+            revoked_certificates,
+        })
+    }
+
+    fn extract_pem_with_marker(data: &[u8], start_marker: &str, end_marker: &str) -> Option<Vec<u8>> {
+        let text = std::str::from_utf8(data).ok()?;
+        let start_idx = text.find(start_marker)? + start_marker.len();
+        let end_idx = text.find(end_marker)?;
+        if start_idx >= end_idx { return None; }
+        let b64_clean: String = text[start_idx..end_idx].chars().filter(|c| !c.is_whitespace()).collect();
+        use base64::Engine;
+        base64::prelude::BASE64_STANDARD.decode(b64_clean).ok()
+    }
+
     /// Read ASN.1 DER Tag-Length-Value. Returns `(tag, content, remaining_bytes)`.
     pub fn read_tlv(data: &[u8]) -> Option<(u8, &[u8], &[u8])> {
         if data.is_empty() {
@@ -453,6 +761,35 @@ impl X509Parser {
         parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(".")
     }
 
+    /// Decodes ASN.1 string types including UTF8String, PrintableString, IA5String, BMPString (UTF-16BE), and UniversalString.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    pub fn decode_asn1_string(tag: u8, bytes: &[u8]) -> String {
+        match tag {
+            0x1E => {
+                // BMPString: UTF-16 Big Endian
+                let u16s: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&u16s)
+            }
+            0x1C => {
+                // UniversalString: UTF-32 Big Endian
+                let mut s = String::new();
+                for chunk in bytes.chunks_exact(4) {
+                    let code = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    if let Some(ch) = char::from_u32(code) {
+                        s.push(ch);
+                    } else {
+                        s.push('\u{FFFD}');
+                    }
+                }
+                s
+            }
+            _ => String::from_utf8_lossy(bytes).to_string(),
+        }
+    }
+
     /// Parses Distinguished Name sequence and extracts full DN line and common components.
     fn parse_distinguished_name(data: &[u8]) -> (String, Option<String>, Option<String>, Option<String>) {
         let mut dn_parts = Vec::new();
@@ -470,8 +807,8 @@ impl X509Parser {
                     set_cur = seq_rem;
                     if seq_tag == 0x30 {
                         if let Some((0x06, oid_bytes, val_rem)) = Self::read_tlv(seq_content) {
-                            if let Some((_, val_bytes, _)) = Self::read_tlv(val_rem) {
-                                let val_str = String::from_utf8_lossy(val_bytes).to_string();
+                            if let Some((val_tag, val_bytes, _)) = Self::read_tlv(val_rem) {
+                                let val_str = Self::decode_asn1_string(val_tag, val_bytes);
                                 let oid_str = Self::decode_oid(oid_bytes);
                                 match oid_str.as_str() {
                                     "2.5.4.3" => {
@@ -512,8 +849,8 @@ impl X509Parser {
         for i in 0..data.len().saturating_sub(target_oid.len() + 2) {
             if &data[i..i + target_oid.len()] == target_oid {
                 let value_slice = &data[i + target_oid.len()..];
-                if let Some((_val_tag, content, _)) = Self::read_tlv(value_slice) {
-                    return Some(String::from_utf8_lossy(content).to_string());
+                if let Some((val_tag, content, _)) = Self::read_tlv(value_slice) {
+                    return Some(Self::decode_asn1_string(val_tag, content));
                 }
             }
         }
@@ -920,6 +1257,31 @@ impl X509Parser {
         }
     }
 
+    fn scan_san_dns_names(data: &[u8], results: &mut Vec<String>) {
+        let san_oid = [0x55, 0x1D, 0x11];
+        for i in 0..data.len().saturating_sub(san_oid.len() + 6) {
+            if data[i..i + san_oid.len()] == san_oid {
+                let rest = &data[i + san_oid.len()..];
+                let mut idx = 0;
+                while idx < rest.len().min(4096) {
+                    if rest[idx] == 0x82 && idx + 1 < rest.len() {
+                        let len = rest[idx + 1] as usize;
+                        if idx + 2 + len <= rest.len() {
+                            let name = String::from_utf8_lossy(&rest[idx + 2..idx + 2 + len]);
+                            if !name.trim().is_empty() && name.contains('.') {
+                                results.push(name.trim().to_string());
+                            }
+                            idx += 2 + len;
+                            continue;
+                        }
+                    }
+                    idx += 1;
+                }
+                break;
+            }
+        }
+    }
+
     pub fn hex_string(bytes: &[u8]) -> String {
         let mut s = String::new();
         for (i, b) in bytes.iter().enumerate() {
@@ -1109,6 +1471,14 @@ mod tests {
         // ML-DSA-65 (Dilithium-3): 2.16.840.1.101.3.4.3.18
         let dilithium_oid = [0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x12];
         assert_eq!(X509Parser::decode_oid(&dilithium_oid), "2.16.840.1.101.3.4.3.18");
+    }
+
+    #[test]
+    fn test_decode_bmp_string_utf16be() {
+        // "Test" in UTF-16BE: 0x00, 'T', 0x00, 'e', 0x00, 's', 0x00, 't'
+        let bmp_bytes = [0x00, b'T', 0x00, b'e', 0x00, b's', 0x00, b't'];
+        let res = X509Parser::decode_asn1_string(0x1E, &bmp_bytes);
+        assert_eq!(res, "Test");
     }
 
     #[test]

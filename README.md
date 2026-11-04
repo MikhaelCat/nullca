@@ -122,9 +122,13 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
     - Subject Alternative Names (SANs) with full DNS Names, IPv4/IPv6 Addresses, Emails, URIs.
     - Authority Information Access (AIA) OCSP Responders and CA Issuer URLs.
     - CRL Distribution Points (revocation endpoint URLs), Subject Key ID (SKI) & Authority Key ID (AKI).
-  - **Multi-Certificate Bundles & Directory Inventory:**
-    - Inspect single certs, full chains, bundles (`ca-certificates.crt`), or entire directories (`/etc/ssl/certs`):
+  - **Live Remote Endpoints, Bundles & Directory Inventory:**
+    - Dissect live servers on the internet, local files, chains, CRLs, and CSRs:
       ```bash
+      # Connect to live remote host and dissect full TLS peer certificate chain:
+      nullca inspect-cert google.com:443
+      nullca inspect-cert github.com
+
       # Dissect single certificate with exact cryptographic fingerprints:
       nullca inspect-cert /etc/ca-certificates/extracted/cadir/ISRG_Root_X1.pem
 
@@ -133,6 +137,12 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
 
       # Scan entire directory and generate cryptographic inventory summary:
       nullca inspect-cert /etc/ca-certificates/extracted/cadir
+
+      # Dissect Certificate Signing Request (CSR / PKCS#10):
+      nullca inspect-cert /path/to/server.csr
+
+      # Dissect Certificate Revocation List (CRL):
+      nullca inspect-cert /path/to/revocations.crl
       ```
 
 ### 🗄️ Non-HTTP Encrypted Protocols (Redis, SQL Database & SMTP)

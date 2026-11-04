@@ -420,95 +420,75 @@ async fn main() -> anyhow::Result<()> {
                         println!("  ⚠️  {:<30} Status: {}", cert.subject_cn.as_deref().unwrap_or("Unknown").yellow(), cert.validity_status.red());
                     }
                 }
-            } else {
-                println!("{} Inspecting X.509 Certificate: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            } else if path.is_file() {
+                println!("{} Inspecting file: {}", "[*]".bold().blue(), path.display().to_string().cyan());
                 let bytes = std::fs::read(&path)?;
+
+                // Check for Certificate Revocation List (CRL)
+                if let Some(crl) = nullca::proto::x509::X509Parser::parse_crl(&bytes) {
+                    println!("\n{}", "=== X.509 Certificate Revocation List (CRL) ===".bold().magenta());
+                    println!("{:<26} {}", "Version:".bold(), crl.version);
+                    println!("{:<26} {}", "Issuer DN:".bold(), crl.issuer_dn.yellow());
+                    println!("{:<26} {}", "Signature Algorithm:".bold(), crl.signature_algorithm);
+                    println!("{:<26} {}", "This Update:".bold(), crl.this_update.as_deref().unwrap_or("?"));
+                    println!("{:<26} {}", "Next Update:".bold(), crl.next_update.as_deref().unwrap_or("None"));
+                    if let Some(ref num) = crl.crl_number {
+                        println!("{:<26} {}", "CRL Number:".bold(), num);
+                    }
+                    println!("{:<26} {}", "Revoked Certificates:".bold(), crl.revoked_count.to_string().red().bold());
+
+                    if !crl.revoked_certificates.is_empty() {
+                        println!("\n{:<20} {:<24} {}", "Serial Number".bold(), "Revocation Date".bold(), "Reason".bold());
+                        println!("{}", "─".repeat(65).dimmed());
+                        for r in &crl.revoked_certificates {
+                            println!("{:<20} {:<24} {}", r.serial_hex.red(), r.revocation_date, r.reason.as_deref().unwrap_or("Unspecified").dimmed());
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Check for Certificate Signing Request (CSR / PKCS#10)
+                let text_sample = String::from_utf8_lossy(&bytes[..bytes.len().min(128)]);
+                if text_sample.contains("CERTIFICATE REQUEST") {
+                    if let Some(csr) = nullca::proto::x509::X509Parser::parse_csr(&bytes) {
+                        println!("\n{}", "=== X.509 Certificate Signing Request (CSR / PKCS#10) ===".bold().cyan());
+                        println!("{:<26} {}", "Version:".bold(), csr.version);
+                        println!("{:<26} {}", "Subject DN:".bold(), csr.subject_dn.green().bold());
+                        if let Some(ref cn) = csr.subject_cn {
+                            println!("{:<26} {}", "  Common Name (CN):".dimmed(), cn);
+                        }
+                        if let Some(ref org) = csr.subject_org {
+                            println!("{:<26} {}", "  Organization (O):".dimmed(), org);
+                        }
+                        println!("{:<26} {}", "Public Key Algorithm:".bold(), csr.public_key_algorithm.cyan().bold());
+                        println!("{:<26} {}", "Signature Algorithm:".bold(), csr.signature_algorithm);
+
+                        if !csr.requested_san_names.is_empty() {
+                            println!("\nRequested SAN Extensions ({} SANs):", csr.requested_san_names.len());
+                            for san in &csr.requested_san_names {
+                                println!("  • {}", san.cyan());
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+
+                // Standard X.509 Certificates / Chains / Bundles
                 let certs = nullca::proto::x509::X509Parser::parse_all(&bytes);
                 if certs.is_empty() {
                     return Err(anyhow::anyhow!("Failed to parse valid X.509 ASN.1 DER/PEM certificate from {:?}", path));
                 }
 
-                if certs.len() == 1 {
-                    let cert = &certs[0];
-                    println!("\n{}", "=== X.509 Certificate Dissection ===".bold().cyan());
-                    println!("{:<26} {}", "Version:".bold(), cert.version);
-                    println!("{:<26} {}", "Serial Number:".bold(), cert.serial_number_hex);
-                    println!("{:<26} {}", "Subject DN:".bold(), cert.subject_dn.green().bold());
-                    if let Some(ref cn) = cert.subject_cn {
-                        println!("{:<26} {}", "  Common Name (CN):".dimmed(), cn);
-                    }
-                    if let Some(ref org) = cert.subject_org {
-                        println!("{:<26} {}", "  Organization (O):".dimmed(), org);
-                    }
-                    if let Some(ref ou) = cert.subject_ou {
-                        println!("{:<26} {}", "  Organizational Unit (OU):".dimmed(), ou);
-                    }
-                    if let Some(ref country) = cert.subject_country {
-                        println!("{:<26} {}", "  Country (C):".dimmed(), country);
-                    }
-
-                    println!("{:<26} {}", "Issuer DN:".bold(), cert.issuer_dn.yellow());
-                    println!("{:<26} {}", "Public Key Algorithm:".bold(), cert.public_key_algorithm.cyan().bold());
-                    println!("{:<26} {}", "Signature Algorithm:".bold(), cert.signature_algorithm);
-                    println!("{:<26} {} -> {}", "Validity Period:".bold(), cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"));
-                    let status_colored = if cert.validity_status.starts_with("EXPIRED") {
-                        cert.validity_status.red().bold()
-                    } else {
-                        cert.validity_status.green().bold()
-                    };
-                    println!("{:<26} {}", "Validity Status:".bold(), status_colored);
-                    println!("{:<26} {}", "Basic Constraints:".bold(), if cert.is_ca { format!("CA: TRUE (PathLen: {:?})", cert.path_length_constraint).yellow().bold() } else { "End-Entity (Leaf)".normal() });
-
-                    if !cert.key_usage.is_empty() {
-                        println!("{:<26} {}", "Key Usage:".bold(), cert.key_usage.join(", "));
-                    }
-                    if !cert.extended_key_usage.is_empty() {
-                        println!("{:<26} {}", "Extended Key Usage:".bold(), cert.extended_key_usage.join(", "));
-                    }
-
-                    if !cert.subject_alt_names.is_empty() {
-                        println!("\nSubject Alternative Names ({} SANs):", cert.subject_alt_names.len());
-                        println!("{}", "─".repeat(50).dimmed());
-                        for san in &cert.subject_alt_names {
-                            println!("  • {}", san.cyan());
-                        }
-                    }
-
-                    if !cert.ocsp_urls.is_empty() {
-                        println!("\nOCSP Responder URLs:");
-                        for url in &cert.ocsp_urls {
-                            println!("  • {}", url.dimmed());
-                        }
-                    }
-
-                    if !cert.crl_distribution_points.is_empty() {
-                        println!("\nCRL Distribution Points:");
-                        for url in &cert.crl_distribution_points {
-                            println!("  • {}", url.dimmed());
-                        }
-                    }
-
-                    if let Some(ref ski) = cert.subject_key_id {
-                        println!("{:<26} {}", "Subject Key ID (SKI):".bold(), ski);
-                    }
-                    if let Some(ref aki) = cert.authority_key_id {
-                        println!("{:<26} {}", "Authority Key ID (AKI):".bold(), aki);
-                    }
-
-                    println!("\n{}", "[Cryptographic Fingerprints]".bold().yellow());
-                    println!("{:<26} {}", "SHA-256 Fingerprint:".bold(), cert.fingerprint_sha256.cyan().bold());
-                    println!("{:<26} {}", "SHA-1 Fingerprint:".bold(), cert.fingerprint_sha1.dimmed());
+                print_certificate_chain(&certs);
+            } else {
+                let target_str = path.to_string_lossy().to_string();
+                if target_str.contains('.') || target_str.contains(':') {
+                    println!("{} Resolving & connecting to live TLS target: {}", "[*]".bold().blue(), target_str.cyan().bold());
+                    let certs = nullca::proto::x509::X509Parser::fetch_remote_certificates(&target_str)?;
+                    println!("{} Retrieved {} live certificate(s) in peer chain", "[+]".bold().green(), certs.len().to_string().bold());
+                    print_certificate_chain(&certs);
                 } else {
-                    println!("\n{}", format!("=== X.509 Certificate Bundle ({} Certificates Dissected) ===", certs.len()).bold().cyan());
-                    println!("{:<4} {:<34} {:<30} {:<6} {}", "#".bold(), "Subject CN".bold(), "Key Algorithm".bold(), "Is CA".bold(), "Status".bold());
-                    println!("{}", "─".repeat(95).dimmed());
-                    for (i, c) in certs.iter().enumerate() {
-                        let cn_display = c.subject_cn.as_deref().unwrap_or("Unknown");
-                        let cn_trimmed = if cn_display.len() > 32 { &cn_display[..32] } else { cn_display };
-                        let ca_str = if c.is_ca { "YES" } else { "NO" };
-                        let status_col = if c.validity_status.starts_with("EXPIRED") { c.validity_status.red() } else { c.validity_status.green() };
-                        println!("{:<4} {:<34} {:<30} {:<6} {}", i + 1, cn_trimmed.cyan(), c.public_key_algorithm, ca_str, status_col);
-                    }
+                    return Err(anyhow::anyhow!("File or remote target not found: {:?}", path));
                 }
             }
         }
@@ -813,4 +793,95 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn print_certificate_chain(certs: &[nullca::proto::x509::X509CertificateInfo]) {
+    if certs.len() == 1 {
+        let cert = &certs[0];
+        println!("\n{}", "=== X.509 Certificate Dissection ===".bold().cyan());
+        println!("{:<26} {}", "Version:".bold(), cert.version);
+        println!("{:<26} {}", "Serial Number:".bold(), cert.serial_number_hex);
+        println!("{:<26} {}", "Subject DN:".bold(), cert.subject_dn.green().bold());
+        if let Some(ref cn) = cert.subject_cn {
+            println!("{:<26} {}", "  Common Name (CN):".dimmed(), cn);
+        }
+        if let Some(ref org) = cert.subject_org {
+            println!("{:<26} {}", "  Organization (O):".dimmed(), org);
+        }
+        if let Some(ref ou) = cert.subject_ou {
+            println!("{:<26} {}", "  Organizational Unit (OU):".dimmed(), ou);
+        }
+        if let Some(ref country) = cert.subject_country {
+            println!("{:<26} {}", "  Country (C):".dimmed(), country);
+        }
+
+        println!("{:<26} {}", "Issuer DN:".bold(), cert.issuer_dn.yellow());
+        println!("{:<26} {}", "Public Key Algorithm:".bold(), cert.public_key_algorithm.cyan().bold());
+        println!("{:<26} {}", "Signature Algorithm:".bold(), cert.signature_algorithm);
+        println!("{:<26} {} -> {}", "Validity Period:".bold(), cert.not_before.as_deref().unwrap_or("?"), cert.not_after.as_deref().unwrap_or("?"));
+        let status_colored = if cert.validity_status.starts_with("EXPIRED") {
+            cert.validity_status.red().bold()
+        } else {
+            cert.validity_status.green().bold()
+        };
+        println!("{:<26} {}", "Validity Status:".bold(), status_colored);
+        println!("{:<26} {}", "Basic Constraints:".bold(), if cert.is_ca { format!("CA: TRUE (PathLen: {:?})", cert.path_length_constraint).yellow().bold() } else { "End-Entity (Leaf)".normal() });
+
+        if !cert.key_usage.is_empty() {
+            println!("{:<26} {}", "Key Usage:".bold(), cert.key_usage.join(", "));
+        }
+        if !cert.extended_key_usage.is_empty() {
+            println!("{:<26} {}", "Extended Key Usage:".bold(), cert.extended_key_usage.join(", "));
+        }
+
+        if !cert.subject_alt_names.is_empty() {
+            println!("\nSubject Alternative Names ({} SANs):", cert.subject_alt_names.len());
+            println!("{}", "─".repeat(50).dimmed());
+            for san in &cert.subject_alt_names {
+                println!("  • {}", san.cyan());
+            }
+        }
+
+        if !cert.ocsp_urls.is_empty() {
+            println!("\nOCSP Responder URLs:");
+            for url in &cert.ocsp_urls {
+                println!("  • {}", url.dimmed());
+            }
+        }
+
+        if !cert.crl_distribution_points.is_empty() {
+            println!("\nCRL Distribution Points:");
+            for url in &cert.crl_distribution_points {
+                println!("  • {}", url.dimmed());
+            }
+        }
+
+        if let Some(ref ski) = cert.subject_key_id {
+            println!("{:<26} {}", "Subject Key ID (SKI):".bold(), ski);
+        }
+        if let Some(ref aki) = cert.authority_key_id {
+            println!("{:<26} {}", "Authority Key ID (AKI):".bold(), aki);
+        }
+
+        println!("\n{}", "[Cryptographic Fingerprints]".bold().yellow());
+        println!("{:<26} {}", "SHA-256 Fingerprint:".bold(), cert.fingerprint_sha256.cyan().bold());
+        println!("{:<26} {}", "SHA-1 Fingerprint:".bold(), cert.fingerprint_sha1.dimmed());
+    } else {
+        println!("\n{}", format!("=== X.509 Certificate Chain / Bundle ({} Certificates) ===", certs.len()).bold().cyan());
+        for (i, c) in certs.iter().enumerate() {
+            let role = if i == 0 { "Leaf / Server Certificate" } else if c.is_ca { "Intermediate / Root CA" } else { "Certificate" };
+            println!("\n{} [{}] {}", "──".dimmed(), format!("#{} {}", i + 1, role).bold().yellow(), "──────────────────────────────────────────────".dimmed());
+            println!("{:<24} {}", "Subject:".bold(), c.subject_dn.green().bold());
+            println!("{:<24} {}", "Issuer:".bold(), c.issuer_dn.yellow());
+            println!("{:<24} {}", "Key Algorithm:".bold(), c.public_key_algorithm.cyan().bold());
+            println!("{:<24} {}", "Signature Suite:".bold(), c.signature_algorithm);
+            println!("{:<24} {} -> {}", "Validity:".bold(), c.not_before.as_deref().unwrap_or("?"), c.not_after.as_deref().unwrap_or("?"));
+            let status_colored = if c.validity_status.starts_with("EXPIRED") { c.validity_status.red().bold() } else { c.validity_status.green().bold() };
+            println!("{:<24} {}", "Status:".bold(), status_colored);
+            println!("{:<24} {}", "SHA-256 Fingerprint:".bold(), c.fingerprint_sha256.cyan());
+            if !c.subject_alt_names.is_empty() && i == 0 {
+                println!("{:<24} {}", "SANs (DNS):".bold(), c.subject_alt_names.join(", ").dimmed());
+            }
+        }
+    }
 }
