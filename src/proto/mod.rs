@@ -1,4 +1,7 @@
 pub mod grpc;
 pub mod http1;
 pub mod http2;
+pub mod huffman;
+pub mod multiplexer;
+pub mod protobuf;
 pub mod reassembler;

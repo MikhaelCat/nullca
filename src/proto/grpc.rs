@@ -5,6 +5,23 @@ pub struct GrpcMessage {
     pub payload: Vec<u8>,
 }
 
+impl GrpcMessage {
+    pub fn parse(data: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        if data.len() < 5 {
+            return Err("Truncated gRPC frame header");
+        }
+        let is_compressed = data[0] != 0;
+        let length = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let total = 5 + length as usize;
+        if data.len() < total {
+            return Err("Incomplete gRPC payload");
+        }
+        let payload = data[5..total].to_vec();
+        let remaining = &data[total..];
+        Ok((Self { is_compressed, length, payload }, remaining))
+    }
+}
+
 pub struct GrpcParser;
 
 impl GrpcParser {

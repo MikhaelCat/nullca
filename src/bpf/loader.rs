@@ -85,6 +85,7 @@ impl BpfLoader {
         tx: mpsc::Sender<TlsEvent>,
     ) -> Result<(), BpfError> {
         let pid = target.map(|t| t.pid).unwrap_or(std::process::id());
+        let comm = target.map(|t| t.name.clone()).unwrap_or_else(|| "curl".into());
         let fd = 3;
 
         // Sample synthetic TLS sessions:
@@ -95,6 +96,7 @@ impl BpfLoader {
             pid,
             fd,
             Direction::Egress,
+            comm.clone(),
             b"GET /api/v1/health HTTP/1.1\r\nHost: api.internal.local\r\nUser-Agent: nullca/0.1\r\nAccept: application/json\r\n\r\n".to_vec(),
             Some(42),
         );
@@ -109,6 +111,7 @@ impl BpfLoader {
             pid,
             fd,
             Direction::Ingress,
+            comm.clone(),
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"status\":\"ok\",\"uptime\":999}".to_vec(),
             Some(115),
         );
@@ -123,6 +126,7 @@ impl BpfLoader {
             pid,
             fd + 1,
             Direction::Egress,
+            comm.clone(),
             vec![
                 b'P', b'R', b'I', b' ', b'*', b' ', b'H', b'T', b'T', b'P', b'/', b'2', b'.', b'0', b'\r', b'\n', b'\r', b'\n', b'S', b'M', b'\r', b'\n', b'\r', b'\n',
                 0x00, 0x00, 0x01, // Length: 1
@@ -149,6 +153,7 @@ impl BpfLoader {
             pid,
             fd + 2,
             Direction::Ingress,
+            comm,
             grpc_data,
             Some(85),
         );

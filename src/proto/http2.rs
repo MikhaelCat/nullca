@@ -282,12 +282,11 @@ impl HpackDecoder {
         *input = &input[len..];
 
         if is_huffman {
-            // Simplified fallback for Huffman: return sanitized printable text
-            let decoded = String::from_utf8_lossy(str_bytes)
-                .chars()
-                .filter(|c| c.is_ascii_graphic() || *c == ' ' || *c == '/' || *c == '-')
-                .collect::<String>();
-            Ok((decoded, consumed + len))
+            let decoded_bytes = crate::proto::huffman::decode_huffman(str_bytes)
+                .map_err(|_| "Huffman decoding failed")?;
+            let s = String::from_utf8(decoded_bytes)
+                .map_err(|_| "Invalid UTF-8 in Huffman decoded string")?;
+            Ok((s, consumed + len))
         } else {
             let s = String::from_utf8_lossy(str_bytes).to_string();
             Ok((s, consumed + len))

@@ -41,6 +41,7 @@ pub struct TlsEvent {
     pub tid: u32,
     pub fd: i32,
     pub direction: Direction,
+    pub comm: String,
     #[serde(skip_serializing)]
     pub data: Vec<u8>,
     pub data_len: usize,
@@ -54,6 +55,7 @@ impl TlsEvent {
         tid: u32,
         fd: i32,
         direction: Direction,
+        comm: String,
         data: Vec<u8>,
         latency_us: Option<u64>,
     ) -> Self {
@@ -64,10 +66,15 @@ impl TlsEvent {
             tid,
             fd,
             direction,
+            comm,
             data,
             data_len,
             latency_us,
         }
+    }
+
+    pub fn protocol(&self) -> ProtocolType {
+        self.detect_protocol()
     }
 
     pub fn detect_protocol(&self) -> ProtocolType {

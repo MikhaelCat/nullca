@@ -162,6 +162,7 @@ mod tests {
                 4242,
                 3,
                 Direction::Egress,
+                "test".into(),
                 b"GET / HTTP/1.1\r\nHost: test.local\r\n\r\n".to_vec(),
                 Some(120),
             );

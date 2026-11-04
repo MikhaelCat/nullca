@@ -16,6 +16,8 @@ pub enum TlsFlavor {
     BoringSsl,
     GoCryptoTls,
     Rustls,
+    GnuTls,
+    Nss,
     Unknown,
 }
 
@@ -110,6 +112,10 @@ impl ProcessScanner {
                             TlsFlavor::OpenSsl
                         } else if file_str.contains("boringssl") {
                             TlsFlavor::BoringSsl
+                        } else if file_str.contains("libgnutls.so") {
+                            TlsFlavor::GnuTls
+                        } else if file_str.contains("libnspr4.so") || file_str.contains("libnss3.so") {
+                            TlsFlavor::Nss
                         } else if file_str.contains("rustls") {
                             TlsFlavor::Rustls
                         } else {

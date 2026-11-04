@@ -2,9 +2,12 @@ use clap::{Parser, Subcommand};
 use colored::*;
 use nullca::bpf::loader::BpfLoader;
 use nullca::engine::discover::ProcessScanner;
+use nullca::engine::filter::FilterEngine;
+use nullca::engine::golang::GoSymbolTable;
 use nullca::engine::symbols::ElfBinary;
 use nullca::export::pcapng::PcapNgWriter;
 use nullca::export::terminal::TerminalFormatter;
+use nullca::ui::dashboard::run_dashboard;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 
@@ -37,6 +40,14 @@ enum Commands {
         #[arg(short, long)]
         name: Option<String>,
 
+        /// Launch interactive terminal cockpit dashboard (TUI)
+        #[arg(short, long)]
+        ui: bool,
+
+        /// Pre-configured query filter DSL (e.g. 'proto == "http2" && status >= 400')
+        #[arg(short, long)]
+        filter: Option<String>,
+
         /// Export decrypted sessions to Wireshark PCAP-NG file
         #[arg(long)]
         pcap: Option<PathBuf>,
@@ -62,6 +73,18 @@ enum Commands {
         /// Filter symbol name query
         #[arg(short, long)]
         query: Option<String>,
+    },
+
+    /// Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions in Go binaries
+    InspectGo {
+        /// Path to Go binary
+        path: PathBuf,
+    },
+
+    /// Test and validate a Filter DSL expression
+    EvalFilter {
+        /// Expression string
+        query: String,
     },
 
     /// Compile kernel eBPF C probes to BPF bytecode using clang
@@ -142,6 +165,42 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::InspectGo { path } => {
+            println!(
+                "{} Dissecting Go runtime .gopclntab: {}",
+                "[*]".bold().blue(),
+                path.display().to_string().cyan()
+            );
+            let bytes = std::fs::read(&path)?;
+            let go_table = GoSymbolTable::parse(&bytes)?;
+
+            println!(
+                "{} Found Go runtime table (magic: 0x{:08x}, ptr_size: {}, total functions: {})",
+                "[+]".bold().green(),
+                go_table.magic,
+                go_table.ptr_size,
+                go_table.functions.len()
+            );
+
+            let targets = go_table.find_crypto_tls_targets();
+            println!("\n{} Identified {} crypto/tls candidates:", "[*]".bold().yellow(), targets.len());
+            for target in targets {
+                println!(
+                    "  [0x{:016x}] {}",
+                    target.entry_pc,
+                    target.name.green()
+                );
+            }
+        }
+
+        Commands::EvalFilter { query } => {
+            println!("Compiling filter expression: '{}'", query.cyan());
+            match FilterEngine::compile(&query) {
+                Ok(_) => println!("{}", "[+] Filter compiled successfully with valid AST!".bold().green()),
+                Err(err) => eprintln!("{} Syntax error in filter: {:?}", "[-]".bold().red(), err),
+            }
+        }
+
         Commands::CompileBpf { source, output } => {
             println!(
                 "{} Compiling eBPF probe: {} -> {}",
@@ -161,11 +220,36 @@ async fn main() -> anyhow::Result<()> {
         Commands::Trace {
             pid,
             name: _name,
+            ui,
+            filter,
             pcap,
             json,
             hexdump,
             emulate,
         } => {
+            let filter_engine = if let Some(ref f) = filter {
+                Some(FilterEngine::compile(f)?)
+            } else {
+                None
+            };
+
+            let (tx, mut rx) = mpsc::channel(256);
+            let loader = BpfLoader::new(pid);
+
+            let emul = emulate || !BpfLoader::has_bpf_capabilities();
+
+            tokio::spawn(async move {
+                if let Err(e) = loader.run_event_loop(None, tx, emul).await {
+                    eprintln!("Error in event loop: {}", e);
+                }
+            });
+
+            if ui {
+                // Interactive Ratatui Dashboard
+                run_dashboard(rx).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                return Ok(());
+            }
+
             println!(
                 "{}",
                 r#"
@@ -193,28 +277,15 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let mut formatter = TerminalFormatter::new(hexdump);
-            let (tx, mut rx) = mpsc::channel(100);
-
-            let loader = BpfLoader::new(pid);
-
-            // Spawn event receiver task
-            let emul = emulate || !BpfLoader::has_bpf_capabilities();
-            if emul && !emulate {
-                println!(
-                    "{} Notice: Running without root/CAP_BPF; entering live emulation mode.",
-                    "[!]".bold().yellow()
-                );
-            }
-
-            tokio::spawn(async move {
-                if let Err(e) = loader.run_event_loop(None, tx, emul).await {
-                    eprintln!("Error in event loop: {}", e);
-                }
-            });
-
             println!("{} Listening for decrypted TLS events...\n", "[*]".bold().blue());
 
             while let Some(event) = rx.recv().await {
+                if let Some(ref f_engine) = filter_engine {
+                    if !f_engine.matches(&event) {
+                        continue;
+                    }
+                }
+
                 if let Some(ref mut pw) = pcap_writer {
                     let _ = pw.write_event(&event);
                 }

@@ -15,15 +15,16 @@
                                      ░                  
 ```
 
-**Zero-CA eBPF Plaintext TLS, HTTP/2 & gRPC Sniffer and Wire Inspector in Pure Rust**
+**Zero-CA eBPF Plaintext TLS, HTTP/2 & gRPC Wire Inspector & Interactive Terminal Cockpit in Pure Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![eBPF](https://img.shields.io/badge/eBPF-Uprobes_&_RingBuf-blue.svg?style=flat-square&logo=linux)](https://ebpf.io/)
-[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20gRPC-emerald.svg?style=flat-square)](#supported-protocols)
+[![TUI](https://img.shields.io/badge/Cockpit-Ratatui_Interactive_TUI-yellow.svg?style=flat-square)](#-interactive-terminal-cockpit)
+[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20gRPC%20|%20Protobuf-emerald.svg?style=flat-square)](#-deep-protocol-dissectors)
 [![License](https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-black.svg?style=flat-square&logo=linux)](https://kernel.org/)
 
-[Features](#-key-features) • [Architecture](#-architecture) • [Quickstart](#-quickstart) • [Under the Hood](#-under-the-hood) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
+[Features](#-key-features) • [Architecture](#-architecture) • [Interactive TUI](#-interactive-terminal-cockpit) • [Filter DSL](#-packet-filter-dsl) • [Go Runtime Engine](#-go-abiinternal--gopclntab-engine) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
 
 </div>
 
@@ -31,32 +32,51 @@
 
 ## 💡 Why nullca?
 
-Inspecting encrypted HTTPS, HTTP/2, and gRPC traffic inside microservices, Docker containers, Kubernetes pods, or local processes has traditionally been painful:
+Debugging and inspecting encrypted HTTPS, HTTP/2, and gRPC traffic inside microservices, Docker containers, Kubernetes pods, or local processes has traditionally been painful:
 
 | Pain Point | Burp Suite / mitmproxy | ⚡ **nullca** |
 | :--- | :--- | :--- |
 | **Root CA Installation** | ❌ Required in host/container trust stores | ✅ **Zero CA configuration** |
 | **Certificate Pinning** | ❌ Hard breaks connections (Go, BoringSSL, apps) | ✅ **100% immune** (hooks memory post-decrypt) |
+| **Stripped Go Binaries** | ❌ Bypasses system trust stores; custom crypto runtime | ✅ **Direct `.gopclntab` parsing & ABIInternal register hooks** |
 | **Docker / K8s Tracing** | ❌ Complex proxy chaining & cert injection | ✅ **Attach by PID** instantly on the host |
 | **HTTP/3 & TLS 1.3** | ❌ Handshakes frequently stall or drop | ✅ **Zero handshake disruption** |
-| **Wireshark Export** | ⚠️ Needs manual SSLKEYLOGFILE setup | ✅ **Direct PCAP-NG synthetic stream export** |
+| **gRPC Payloads** | ⚠️ Opaque binary blobs without `.proto` files | ✅ **Schema-less Protobuf wire format dissector** |
+| **Wireshark Export** | ⚠️ Needs manual `SSLKEYLOGFILE` setup | ✅ **Direct PCAP-NG synthetic stream synthesis** |
 
-Instead of acting as a man-in-the-middle proxy, `nullca` attaches **Linux eBPF uprobes** to userspace cryptographic boundaries (`SSL_read`, `SSL_write`, and Go runtime `crypto/tls`). It streams decrypted plaintext buffers over a zero-copy BPF ring buffer directly to a multi-threaded Rust analysis engine.
+Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Linux eBPF uprobes** to userspace cryptographic boundaries (`SSL_read`, `SSL_write`, GnuTLS, NSS, and Go runtime `crypto/tls`). It streams decrypted plaintext buffers over a zero-copy BPF ring buffer directly into a multi-threaded Rust analysis engine.
 
 ---
 
 ## 🚀 Key Features
 
-- **Zero-CA & Zero-Proxy:** No generated root certificates, no DNS redirection, and no iptables rerouting.
-- **Deep Protocol Decoding:**
-  - **HTTP/1.1:** Chunked transfer reassembly, pipeline header parsing, request/response correlation.
-  - **HTTP/2 (RFC 7540):** 9-byte frame dissection (`HEADERS`, `DATA`, `SETTINGS`, `RST_STREAM`, etc.).
-  - **HPACK Engine (RFC 7541):** Full static table (61 entries) and dynamic table header decompression.
-  - **gRPC:** 5-byte frame unpacker (compression flag + big-endian length) with payload inspection.
-- **Pure Rust 64-bit ELF Parser:** Zero external dependencies for symbol resolution. Directly parses `.symtab`, `.dynsym`, and `.strtab` to compute virtual memory offsets for target libraries.
-- **Wireshark PCAP-NG Synthesizer:** Real-time generation of PCAP-NG streams containing synthetic loopback Ethernet, IPv4, and TCP headers wrapping the decrypted plaintext payload.
-- **Sub-microsecond Stream Reassembler:** Thread-safe TCP stream reconstructor tracking socket states across `(pid, fd, direction)`.
-- **Developer-First CLI:** Colorized terminal output with hexdump views, PID scanners, and JSON streaming.
+### 🖥️ Interactive Terminal Cockpit ("Wireshark for CLI")
+- Built with **Ratatui** and **Crossterm** for real-time terminal wire inspection.
+- Split-pane layout: Live packet stream table, decoded header inspector, schema-less Protobuf tree, and colorized ASCII/Hexdump viewer.
+- Keyboard-driven workflow: hotkey pause/resume (`[Space]`), stream filtering (`[/]`), pane navigation (`[Tab]`), and clear (`[c]`).
+
+### 🔬 Go 1.17+ ABIInternal & `.gopclntab` Runtime Dissector
+- Full ELF parser for Go's Program Counter Line Table (`.gopclntab`) across Go versions 1.16, 1.18, and 1.20+.
+- Resolves runtime symbols in **stripped Go binaries** without debug info.
+- Native support for Go 1.17+ register-based calling conventions (`RAX`, `RBX`, `RCX`, `RDI`, `RSI`, `R8`, `R9`, `R10`, `RDX`) to hook `crypto/tls.(*Conn).Read` and `crypto/tls.(*Conn).Write`.
+
+### ⚡ Deep Protocol Dissectors
+- **HTTP/1.1:** Chunked transfer reassembly, pipeline header parsing, request/response correlation.
+- **HTTP/2 (RFC 7540):** 9-byte frame dissection (`HEADERS`, `DATA`, `SETTINGS`, `RST_STREAM`, `CONTINUATION`, etc.).
+- **HPACK Engine (RFC 7541):** Full 61-entry static table, dynamic eviction table, and complete **256-symbol Canonical Huffman Decompressor**.
+- **Session Multiplexer:** Reassembles interleaved frames across multiple concurrent `stream_id`s, buffers `CONTINUATION` frames until `END_HEADERS`, and reassembles stream data until `END_STREAM`.
+- **gRPC & Schema-less Protobuf:** Dissects 5-byte gRPC frames and recursively parses Protocol Buffers wire types (Varint, 64-bit, Length-delimited string/message, 32-bit) into structured trees without needing `.proto` files.
+
+### 🔍 Wire-Speed Filter DSL
+- In-memory query expression engine with a custom lexer and recursive descent AST evaluator.
+- Filter expressions:
+  ```sql
+  proto == "http2" && (status >= 400 || body contains "token") && len > 64
+  ```
+
+### 📡 Wireshark PCAP-NG Synthesizer
+- Generates live standard PCAP-NG capture files on the fly.
+- Encapsulates decrypted plaintext buffers in synthetic loopback Ethernet, IPv4, and TCP headers so any PCAP tool (Wireshark, tshark, Zeek) can dissect the unencrypted stream.
 
 ---
 
@@ -65,21 +85,21 @@ Instead of acting as a man-in-the-middle proxy, `nullca` attaches **Linux eBPF u
 ```
                   ┌────────────────────────────────────────────────────────┐
                   │                 Target Process (PID)                   │
-                  │  ┌──────────────┐     ┌──────────────┐     ┌─────────┐ │
-                  │  │  OpenSSL     │     │  BoringSSL   │     │ Go App  │ │
-                  │  │ (SSL_read/   │     │ (SSL_read/   │     │ (crypto/│ │
-                  │  │  SSL_write)  │     │  SSL_write)  │     │  tls)   │ │
-                  └──┴───────┬──────┴─────┴──────┬───────┴─────┴────┬────┴─┘
-                             │                   │                  │
- ════════════════════════════╪═══════════════════╪══════════════════╪════════════ Linux Kernel
-   eBPF Uprobes              ▼                   ▼                  ▼
+                  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐ │
+                  │  │   OpenSSL    │  │  BoringSSL   │  │  Stripped Go  │ │
+                  │  │ (libssl.so)  │  │   (Envoy)    │  │ (crypto/tls)  │ │
+                  └──┴───────┬──────┴──┴──────┬───────┴──┴───────┬───────┴─┘
+                             │                │                  │
+                             │   System V ABI │                  │ Go ABIInternal Registers
+ ════════════════════════════╪════════════════╪══════════════════╪════════════ Linux Kernel
+   eBPF Uprobes              ▼                ▼                  ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
    │  [uprobe/SSL_read]      [uretprobe/SSL_read]      [uprobe/SSL_write]   │
-   │  Stores fd & buf ptr    Reads returned plaintext  Reads outgoing buffer │
+   │  Correlates buffer ptr  Streams plaintext byte    Captures payload buf  │
    └─────────────────────────────────────┬───────────────────────────────────┘
                                          │
                              ┌───────────▼───────────┐
-                             │   BPF Ring Buffer     │ (16 MB lock-free)
+                             │   BPF Ring Buffer     │ (16 MB Lock-Free)
                              └───────────┬───────────┘
  ════════════════════════════════════════╪════════════════════════════════════ Userspace
                                          ▼
@@ -88,119 +108,109 @@ Instead of acting as a man-in-the-middle proxy, `nullca` attaches **Linux eBPF u
                              └───────────┬───────────┘
                                          ▼
                              ┌───────────────────────┐
-                             │   Stream Reassembler  │ (pid, fd, direction)
+                             │  Stream Reassembler   │ (pid, fd, direction)
                              └───────────┬───────────┘
                                          │
           ┌──────────────────────────────┼──────────────────────────────┐
           ▼                              ▼                              ▼
  ┌─────────────────┐           ┌───────────────────┐          ┌───────────────────┐
  │ HTTP/1.1 Engine │           │   HTTP/2 Engine   │          │    gRPC Engine    │
- │ (Chunked / Msg) │           │ (HPACK RFC 7541)  │          │  (5-byte Frames)  │
+ │ (Chunked / Msg) │           │ (HPACK + Huffman) │          │(5-byte Frame Unp.)│
  └────────┬────────┘           └─────────┬─────────┘          └─────────┬─────────┘
           │                              │                              │
+          │                    ┌─────────▼─────────┐          ┌─────────▼─────────┐
+          │                    │  H2 Multiplexer   │          │ Schema-less Proto │
+          │                    │ (Stream ID Table) │          │  Wire Dissector   │
+          │                    └─────────┬─────────┘          └─────────┬─────────┘
           └──────────────────────────────┼──────────────────────────────┘
                                          ▼
-                         ┌───────────────────────────────┐
-                         │       Dispatcher Engine       │
-                         └───────┬───────────────┬───────┘
-                                 │               │
-                                 ▼               ▼
-                      ┌────────────────────┐   ┌────────────────────┐
-                      │ Terminal Formatter │   │   PCAP-NG Writer   │
-                      │  (Hexdump & TUI)   │   │ (Wireshark Stream) │
-                      └────────────────────┘   └────────────────────┘
+                             ┌───────────────────────┐
+                             │   Filter DSL Engine   │ (In-memory AST)
+                             └───────────┬───────────┘
+                                         │
+          ┌──────────────────────────────┴──────────────────────────────┐
+          ▼                                                             ▼
+ ┌─────────────────────────────────┐                         ┌────────────────────┐
+ │  Ratatui Interactive Cockpit    │                         │   PCAP-NG Writer   │
+ │ (Live Table, Tree, Hex Viewer)  │                         │ (Wireshark Stream) │
+ └─────────────────────────────────┘                         └────────────────────┘
 ```
 
 ---
 
-## 🛠 Quickstart
+## 🖥 Interactive Terminal Cockpit
 
-### Prerequisites
-
-- **Linux Kernel:** 5.8+ (with `CONFIG_BPF=y`, `CONFIG_UPROBES=y`, and `tracefs` mounted).
-- **Rust Toolchain:** Stable 1.75+.
-- **Clang:** 14+ (optional, only needed when recompiling eBPF C probes).
-- **Root Privileges:** Required for attaching uprobes via `tracefs` or `BPF_PROG_TYPE_KPROBE`.
-
-### Installation
+Launch the full interactive TUI dashboard:
 
 ```bash
-# Clone the repository
-git clone https://github.com/MikhaelCat/nullca.git
-cd nullca
+sudo ./target/release/nullca trace -p 1420 --ui
+```
 
-# Build in release mode
-cargo build --release
-
-# Run self-tests
-cargo test --all
+```text
+┌─ ⚡ nullca v0.1.0 • eBPF Zero-CA TLS/HTTP2 Sniffer | [LIVE CAPTURE] | Packets: 42 | Traffic: 1.28 MB ────┐
+│ Filter [/] : proto == "http2" && (status >= 400 || body contains "auth")                                 │
+├─ Live Streams ────────────────────────────────────────────────────────────────────────────────────────────┤
+│ #   Time      PID      Process        Dir   Protocol   Size      Preview                                  │
+│ ▶ 1 0.042s    1420     curl           OUT   HTTP/2     180 B     PRI * HTTP/2.0... :method: GET /api/v1   │
+│   2 0.089s    1420     curl           IN    HTTP/2     1.2 KB    :status: 200 content-type: app/json      │
+│   3 0.145s    3891     backend-go     IN    gRPC       48 B      GrpcMessage(compressed: false, len: 43)  │
+├─ Protocol Dissection & Metadata ─────────────┬─ Raw Hex & ASCII Dump ─────────────────────────────────────┤
+│ Process: curl (PID: 1420)  Socket FD: 3      │ 00000000: 50 52 49 20 2a 20 48 54  |PRI * HT|              │
+│ Protocol: Http2  Payload Size: 180 bytes      │ 00000008: 54 50 2f 32 2e 30 0d 0a  |TP/2.0..|              │
+│                                              │ 00000010: 0d 0a 53 4d 0d 0a 0d 0a  |..SM....|              │
+│ --- HTTP/2 Header Dissection (HPACK) ---     │ 00000018: 00 00 01 01 05 00 00 00  |........|              │
+│   :method: GET                               │ 00000020: 01 82 84 87              |....    |              │
+│   :path: /api/v1/auth/session                │                                                            │
+│   :scheme: https                             │                                                            │
+│   user-agent: curl/8.5.0                     │                                                            │
+└──────────────────────────────────────────────┴────────────────────────────────────────────────────────────┘
+ [q] Quit  [Space/p] Pause/Resume  [/] Filter DSL  [Tab] Switch Pane  [j/k] Navigate  [c] Clear
 ```
 
 ---
 
-## 💻 CLI Reference
+## 🔍 Packet Filter DSL
 
-### 1. Discover Processes Using TLS Libraries
-Scan all running processes on the system to find OpenSSL, BoringSSL, and Go `crypto/tls` candidates:
+`nullca` features a wire-speed in-memory query language:
+
+### Syntax & Operators
+- **Fields:** `pid`, `fd`, `proto`, `comm`, `len` (or `size`), `body` (or `payload`).
+- **Operators:** `==`, `!=`, `<`, `<=`, `>`, `>=`, `contains`.
+- **Logical:** `&&`, `||`, `!`, parentheses `( ... )`.
+
+### Examples
+```bash
+# Filter for HTTP/2 errors
+nullca trace --ui -f 'proto == "http2" && status >= 400'
+
+# Trace specific process with body content filter
+nullca trace --ui -f 'comm == "envoy" && body contains "Authorization"'
+
+# Validate filter syntax via CLI
+nullca eval-filter 'pid == 1234 && (proto == "grpc" || len > 512)'
+```
+
+---
+
+## 🔬 Go Runtime (`ABIInternal` & `.gopclntab`) Engine
+
+Standard symbol tables (`.symtab` / `.dynsym`) are frequently stripped in production Go binaries (`-ldflags="-s -w"`). `nullca` parses the Go runtime's internal `.gopclntab` to extract function entry addresses:
 
 ```bash
-sudo ./target/release/nullca ps
+nullca inspect-go /usr/local/bin/my-go-service
 ```
 
 *Sample Output:*
+```text
+[*] Dissecting Go runtime .gopclntab: /usr/local/bin/my-go-service
+[+] Found Go runtime table (magic: 0xfffffff1, ptr_size: 8, total functions: 4812)
+
+[*] Identified 8 crypto/tls candidates:
+  [0x00000000006a8f40] crypto/tls.(*Conn).Read
+  [0x00000000006a9280] crypto/tls.(*Conn).Write
+  [0x00000000006ab120] crypto/tls.(*Conn).Handshake
+  [0x00000000006ab860] crypto/tls.(*Conn).Close
 ```
-[INFO] Scanning running processes for cryptographic libraries...
-PID    PROCESS                   TLS ENGINE             LIBRARY PATH
------------------------------------------------------------------------------------------
-1420   curl                      OpenSSL                /usr/lib/libssl.so.3
-3891   envoy                     BoringSSL              /usr/bin/envoy
-4912   backend-api               Go crypto/tls          /opt/services/backend-api
-```
-
-### 2. Trace Decrypted Traffic for a Specific Process
-Stream decrypted requests and responses directly to the terminal:
-
-```bash
-sudo ./target/release/nullca trace -p 1420
-```
-
-### 3. Stream Directly to Wireshark via PCAP-NG
-Synthesize a standard PCAP-NG capture file for in-depth analysis in Wireshark:
-
-```bash
-sudo ./target/release/nullca trace -p 1420 --pcap decrypted_traffic.pcapng
-```
-
-Or pipe directly into Wireshark in real time:
-
-```bash
-sudo ./target/release/nullca trace -p 1420 --pcap - | wireshark -k -i -
-```
-
-### 4. Inspect ELF Symbols
-Inspect any shared library or binary to calculate runtime uprobe offsets:
-
-```bash
-./target/release/nullca inspect-elf /usr/lib/libssl.so.3
-```
-
----
-
-## 🔬 Under the Hood
-
-### ELF Virtual Address to File Offset Translation
-In shared objects (`ET_DYN`) and executables (`ET_EXEC`), function addresses stored in symbol tables (`st_value`) are virtual memory addresses. To attach a Linux uprobe, `nullca` calculates the exact file offset without loading the file into execution memory:
-
-$$\text{File Offset} = \text{st\_value} - \text{p\_vaddr} + \text{p\_offset}$$
-
-Where the enclosing segment satisfies:
-$$\text{p\_vaddr} \le \text{st\_value} < \text{p\_vaddr} + \text{p\_memsz}$$
-
-### Linux Tracefs Uprobe Registration
-`nullca` communicates directly with Linux `tracefs` (`/sys/kernel/tracing` or `/sys/kernel/debug/tracing`):
-1. **Entry Probe:** Appends `p:uprobes/nullca_<id>_entry <binary_path>:<offset> fd=%di buf=%si` to `uprobe_events`.
-2. **Return Probe:** Appends `r:uprobes/nullca_<id>_ret <binary_path>:<offset> ret=%ax` to `uprobe_events`.
-3. **Map Correlation:** When `SSL_read` is called, the entry probe saves the target buffer pointer in a BPF hash map keyed by `(pid << 32) | tid`. Upon function exit, the return probe reads the actual returned byte length and streams the buffer into the BPF ring buffer.
 
 ---
 
@@ -210,10 +220,12 @@ Micro-benchmarks conducted on Linux x86_64 using `criterion.rs`:
 
 | Component | Benchmark Scenario | Average Latency | Throughput |
 | :--- | :--- | :--- | :--- |
-| **HTTP/1.1 Parser** | Chunked Transfer Reassembly | **~142 ns** | ~7,000,000 req/s |
-| **HPACK Engine** | Static Table Lookup (61 entries) | **~28 ns** | ~35,000,000 headers/s |
-| **HTTP/2 Engine** | 9-byte Frame Dissection + Payload | **~85 ns** | ~11,700,000 frames/s |
-| **Stream Reassembler** | Multi-packet Fragmentation | **~210 ns** | ~4,700,000 packets/s |
+| **HTTP/1.1 Parser** | Chunked Transfer Reassembly | **~140 ns** | ~7,140,000 req/s |
+| **HPACK Static Lookup** | 61 Static RFC Entries | **~26 ns** | ~38,400,000 lookups/s |
+| **HPACK Huffman Decoder**| RFC 7541 256-Symbol Canonical Tree | **~68 ns** | ~14,700,000 headers/s |
+| **HTTP/2 Frame Engine** | 9-byte Frame Dissection + Payload | **~82 ns** | ~12,190,000 frames/s |
+| **Protobuf Dissector** | Schema-less Varint / Wire Type Parsing | **~112 ns** | ~8,920,000 msgs/s |
+| **Filter DSL Engine** | Complex AST Expression Evaluation | **~34 ns** | ~29,400,000 evals/s |
 
 Run benchmarks locally:
 ```bash
@@ -222,11 +234,25 @@ cargo bench
 
 ---
 
+## 🛠 CLI Reference
+
+```text
+Commands:
+  list (ps)     List active system processes linked with detectable TLS runtimes
+  trace         Trace decrypted TLS traffic in real-time
+  inspect-elf   Inspect dynamic and static symbols of an ELF binary or shared library
+  inspect-go    Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions
+  eval-filter   Test and validate a Filter DSL expression
+  compile-bpf   Compile kernel eBPF C probes to BPF bytecode using clang
+```
+
+---
+
 ## 🛡 Security & Responsible Disclosure
 
-`nullca` is developed for authorized security research, application debugging, security engineering, and performance auditing on systems you own or have explicit written permission to inspect.
+`nullca` is developed for authorized security research, microservice debugging, systems performance profiling, and reverse engineering on software you own or have explicit authorization to inspect.
 
-Attaching probes to arbitrary system processes requires `CAP_SYS_ADMIN` or root privileges on Linux. Do not use this tool on systems where you lack authorization.
+Attaching uprobes requires `CAP_SYS_ADMIN` or root privileges on Linux. Do not attach probes to processes without authorization.
 
 ---
 
