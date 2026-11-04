@@ -46,6 +46,14 @@ impl PcapNgWriter {
         Ok(Self { file })
     }
 
+    pub fn write_to_file<P: AsRef<Path>>(events: &[TlsEvent], path: P) -> io::Result<()> {
+        let mut writer = Self::create(path)?;
+        for event in events {
+            writer.write_event(event)?;
+        }
+        Ok(())
+    }
+
     pub fn write_event(&mut self, event: &TlsEvent) -> io::Result<()> {
         if event.data.is_empty() {
             return Ok(());

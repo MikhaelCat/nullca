@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod diff;
 pub mod discover;
 pub mod event;

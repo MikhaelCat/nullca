@@ -29,3 +29,7 @@ pub use proto::reassembler::StreamReassembler;
 pub use proto::secrets::{scan_secrets, DetectedSecret, SecretDetector, SecretKind};
 pub use proto::websocket::{WebSocketAssembler, WebSocketFrame, WebSocketOpcode, WebSocketParser};
 pub use proto::x509::{CertScanSummary, RevokedCertEntry, X509CertificateInfo, X509CrlInfo, X509CsrInfo, X509Parser};
+pub use engine::audit::{AuditCategory, AuditFinding, AuditReport, AuditSeverity, SecurityAuditor};
+pub use export::openapi::{OpenApiGenerator, OpenApiSpec};
+pub use export::sslkeylog::{SslKeyLogEntry, SslKeyLogWriter, TlsKeyLabel};
+

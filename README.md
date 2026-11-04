@@ -28,7 +28,7 @@
 [![Export](https://img.shields.io/badge/Export-cURL_|_HAR_1.2_|_PCAP--NG-lightgrey.svg?style=flat-square)](#-copy-as-curl--har-12-export)
 [![License](https://img.shields.io/badge/License-MIT-black.svg?style=flat-square)](LICENSE)
 
-[Why nullca?](#-why-nullca) • [Key Features](#-key-features) • [Architecture](#-architecture) • [Spawn & Trace](#-spawn--trace-mode) • [Interactive Cockpit](#-interactive-terminal-cockpit) • [Packet Diff](#-side-by-side--unified-packet-diff-engine) • [Live Replay](#-live-request-replay--tampering) • [IPC Streaming](#-unix-domain-socket-ipc-streaming) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
+[Why nullca?](#-why-nullca) • [Key Features](#-key-features) • [Architecture](#-architecture) • [Documentation (docs/)](docs/) • [Spawn & Trace](#-spawn--trace-mode) • [Interactive Cockpit](#-interactive-terminal-cockpit) • [Packet Diff](#-side-by-side--unified-packet-diff-engine) • [Live Replay](#-live-request-replay--tampering) • [IPC Streaming](#-unix-domain-socket-ipc-streaming) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
 
 </div>
 
@@ -407,20 +407,34 @@ cargo bench
 
 ```text
 Commands:
-  list (ps)     List active system processes linked with detectable TLS runtimes
-  trace         Trace decrypted TLS traffic of a running process in real-time
-  run           Spawn a target command and immediately trace its decrypted TLS activity
-  stream        Stream live decrypted events from a background NullCA daemon socket
-  replay        Replay and tamper an HTTP request against a target server with microsecond latency metrics
-  diff          Compare two intercepted packets, payload dumps, or HTTP messages side-by-side
-  inspect-cert  Dissect and inspect an X.509 certificate (PEM or DER binary)
-  completions   Generate shell autocompletion script (bash, zsh, fish, powershell)
-  scan-secrets  Scan a file or dump for leaked JWT tokens, API keys, and CTF flags
-  inspect-elf   Inspect dynamic and static symbols of an ELF binary or shared library
-  inspect-go    Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions in Go binaries
-  eval-filter   Test and validate a Filter DSL expression
-  compile-bpf   Compile kernel eBPF C probes to BPF bytecode using clang
+  list (ps)        List active system processes linked with detectable TLS runtimes
+  trace            Trace decrypted TLS traffic of a running process in real-time
+  run              Spawn a target command and immediately trace its decrypted TLS activity
+  stream           Stream live decrypted events from a background NullCA daemon socket
+  replay           Replay and tamper an HTTP request against a target server with microsecond latency metrics
+  diff             Compare two intercepted packets, payload dumps, or HTTP messages side-by-side
+  inspect-cert     Dissect and inspect an X.509 certificate (PEM, DER, bundles, CRL, CSR, remote live TLS)
+  export-openapi   Synthesize an OpenAPI 3.0.3 specification from captured HTTP HAR logs or traffic
+  audit            Run passive security posture, header hygiene, and secret leak audit on traffic
+  export-sslkeylog Export TLS session secrets in standard NSS SSLKEYLOGFILE format for Wireshark
+  completions      Generate shell autocompletion script (bash, zsh, fish, powershell)
+  scan-secrets     Scan a file or dump for leaked JWT tokens, API keys, and CTF flags
+  inspect-elf      Inspect dynamic and static symbols of an ELF binary or shared library
+  inspect-go       Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions in Go binaries
+  eval-filter      Test and validate a Filter DSL expression
+  compile-bpf      Compile kernel eBPF C probes to BPF bytecode using clang
 ```
+
+---
+
+## 📚 Complete Project Documentation (`docs/`)
+
+Comprehensive technical guides are available in the [`docs/`](docs/) directory:
+- 📖 [**Architecture & System Design**](docs/ARCHITECTURE.md) - Data pipeline, zero-copy ring buffers, and concurrency model.
+- ⚙️ [**eBPF Zero-CA Engine**](docs/EBPF_ENGINE.md) - Deep dive into uprobes, Go ABIInternal register conventions, and `.gopclntab`.
+- 🔌 [**Supported Protocols & Dissectors**](docs/PROTOCOLS.md) - HTTP/1.1, HTTP/2 HPACK, gRPC Protobuf, WebSocket RFC 6455, X.509 ASN.1 & PQC, DB protocols.
+- 💻 [**CLI Reference Manual**](docs/CLI_REFERENCE.md) - Every command, option, flag, and filter DSL expression with practical examples.
+- 🛡️ [**Passive Security Auditor & OpenAPI Generator**](docs/SECURITY_AUDIT_AND_OPENAPI.md) - Hygiene rules, HSTS/CORS audits, and schema synthesis algorithms.
 
 ---
 

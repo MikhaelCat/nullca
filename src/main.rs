@@ -12,6 +12,9 @@ use nullca::engine::symbols::ElfBinary;
 use nullca::export::har::HarExporter;
 use nullca::export::pcapng::PcapNgWriter;
 use nullca::export::terminal::TerminalFormatter;
+use nullca::engine::audit::SecurityAuditor;
+use nullca::export::openapi::OpenApiGenerator;
+use nullca::export::sslkeylog::SslKeyLogWriter;
 use nullca::proto::secrets::scan_secrets;
 use nullca::ui::dashboard::run_dashboard;
 use std::collections::HashMap;
@@ -211,6 +214,43 @@ enum Commands {
 
         /// Output ELF object path
         #[arg(short, long, default_value = "target/tls_uprobe.bpf.o")]
+        output: PathBuf,
+    },
+
+    /// Synthesize an OpenAPI 3.0 specification from captured HTTP HAR logs or traffic
+    ExportOpenapi {
+        /// Input HAR file path (.har)
+        #[arg(short, long)]
+        har: PathBuf,
+
+        /// Output path for OpenAPI specification (JSON)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// API specification title
+        #[arg(short, long, default_value = "Intercepted API Specification")]
+        title: String,
+
+        /// API specification version
+        #[arg(short, long, default_value = "1.0.0")]
+        version: String,
+    },
+
+    /// Run passive security posture, header hygiene, and secret leak audit on captured traffic
+    Audit {
+        /// Input HAR file path (.har)
+        #[arg(short, long)]
+        har: PathBuf,
+
+        /// Output findings as structured JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Export TLS session secrets in standard NSS SSLKEYLOGFILE format for Wireshark
+    ExportSslkeylog {
+        /// Output SSLKEYLOGFILE path
+        #[arg(short, long)]
         output: PathBuf,
     },
 }
@@ -684,6 +724,50 @@ async fn main() -> anyhow::Result<()> {
 
             BpfLoader::compile_bpf_program(&source, &output)?;
             println!("{}", "[+] eBPF bytecode compilation successful!".bold().green());
+        }
+
+        Commands::ExportOpenapi { har, output, title, version } => {
+            println!("{} Loading HAR capture: {}", "[*]".bold().blue(), har.display().to_string().cyan());
+            let file = std::fs::File::open(&har)?;
+            let har_data: nullca::export::har::HarRoot = serde_json::from_reader(file)?;
+
+            let generator = OpenApiGenerator::new();
+            let spec = generator.generate_from_har_entries(&har_data.log.entries, &title, &version);
+            let json_str = generator.to_json_string(&spec)?;
+
+            if let Some(out_path) = output {
+                std::fs::write(&out_path, &json_str)?;
+                println!(
+                    "{} OpenAPI 3.0 specification successfully saved to: {}",
+                    "[+]".bold().green(),
+                    out_path.display().to_string().cyan().bold()
+                );
+            } else {
+                println!("{}", json_str);
+            }
+        }
+
+        Commands::Audit { har, json } => {
+            let file = std::fs::File::open(&har)?;
+            let har_data: nullca::export::har::HarRoot = serde_json::from_reader(file)?;
+
+            let auditor = SecurityAuditor::new();
+            let report = auditor.audit_har_entries(&har_data.log.entries);
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                auditor.print_report(&report);
+            }
+        }
+
+        Commands::ExportSslkeylog { output } => {
+            println!("{} Initializing NSS SSLKEYLOGFILE writer at: {}", "[*]".bold().blue(), output.display().to_string().cyan());
+            let _writer = SslKeyLogWriter::open_append(&output)?;
+            println!(
+                "{} SSLKEYLOGFILE writer ready. Point Wireshark to this file: Edit -> Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename",
+                "[+]".bold().green()
+            );
         }
 
         Commands::Trace {
