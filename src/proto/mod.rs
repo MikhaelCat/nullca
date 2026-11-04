@@ -5,3 +5,4 @@ pub mod huffman;
 pub mod multiplexer;
 pub mod protobuf;
 pub mod reassembler;
+pub mod secrets;

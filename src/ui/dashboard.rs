@@ -1,13 +1,16 @@
 //! Interactive Terminal TUI Cockpit ("Wireshark for CLI").
 //!
 //! Provides a real-time, interactive terminal dashboard for live stream inspection,
-//! hex decoding, protocol dissection, and in-memory filtering.
+//! hex decoding, protocol dissection, JWT & secrets detection, and in-memory filtering.
 
 use crate::engine::event::{Direction, ProtocolType, TlsEvent};
 use crate::engine::filter::FilterEngine;
+use crate::export::curl::CurlExporter;
+use crate::export::har::HarExporter;
 use crate::proto::grpc::GrpcMessage;
 use crate::proto::http1::{Http1Message, Http1Parser};
 use crate::proto::protobuf::ProtobufMessage;
+use crate::proto::secrets::scan_secrets;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
@@ -44,7 +47,8 @@ pub struct DashboardState {
     pub filter_engine: Option<FilterEngine>,
     pub total_bytes: usize,
     pub start_time: Instant,
-    pub selected_tab: usize, // 0: Headers/Summary, 1: Protobuf Tree, 2: Raw Hex
+    pub selected_tab: usize, // 0: Details, 1: Protobuf, 2: JWT & Secrets, 3: cURL Command
+    pub status_message: Option<(String, Instant)>,
 }
 
 impl Default for DashboardState {
@@ -69,7 +73,12 @@ impl DashboardState {
             total_bytes: 0,
             start_time: Instant::now(),
             selected_tab: 0,
+            status_message: None,
         }
+    }
+
+    pub fn set_status(&mut self, msg: String) {
+        self.status_message = Some((msg, Instant::now()));
     }
 
     pub fn push_event(&mut self, event: TlsEvent) {
@@ -218,10 +227,28 @@ async fn dashboard_loop(
                         state.is_filtering = true;
                     }
                     KeyCode::Char('c') => {
+                        if let Some(ev) = state.selected_event() {
+                            if let Some(curl_cmd) = CurlExporter::from_payload(&ev.data) {
+                                state.set_status(format!("cURL: {}", curl_cmd.lines().next().unwrap_or("")));
+                            } else {
+                                state.set_status("Selected packet is not an HTTP request".into());
+                            }
+                        }
+                    }
+                    KeyCode::Char('e') => {
+                        let path = "nullca_capture.har";
+                        if HarExporter::write_to_file(&state.events, path).is_ok() {
+                            state.set_status(format!("Exported {} packets to '{}'", state.events.len(), path));
+                        } else {
+                            state.set_status("Failed to export HAR file".into());
+                        }
+                    }
+                    KeyCode::Char('x') => {
                         state.events.clear();
                         state.filtered_indices.clear();
                         state.total_bytes = 0;
                         state.table_state.select(None);
+                        state.set_status("Buffer cleared".into());
                     }
                     KeyCode::Tab => {
                         state.active_pane = match state.active_pane {
@@ -239,6 +266,7 @@ async fn dashboard_loop(
                     KeyCode::Char('1') => state.selected_tab = 0,
                     KeyCode::Char('2') => state.selected_tab = 1,
                     KeyCode::Char('3') => state.selected_tab = 2,
+                    KeyCode::Char('4') => state.selected_tab = 3,
                     _ => {}
                 }
             }
@@ -283,24 +311,31 @@ fn draw_header(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
         Span::styled(" [LIVE CAPTURE] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     };
 
-    let title_line = Line::from(vec![
+    let mut title_spans = vec![
         Span::styled("⚡ nullca ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled("v0.1.0 • eBPF Zero-CA TLS/HTTP2 Sniffer", Style::default().fg(Color::DarkGray)),
+        Span::styled("v0.1.0 • eBPF TLS/HTTP2/gRPC Sniffer", Style::default().fg(Color::DarkGray)),
         Span::raw(" | "),
         status_pill,
-        Span::raw(" | Packets: "),
+        Span::raw(" | Pkts: "),
         Span::styled(format!("{}", state.events.len()), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" (Filtered: "),
         Span::styled(format!("{}", state.filtered_indices.len()), Style::default().fg(Color::LightBlue)),
         Span::raw(") | Traffic: "),
         Span::styled(format!("{:.2} MB", state.total_bytes as f64 / (1024.0 * 1024.0)), Style::default().fg(Color::Magenta)),
         Span::styled(format!(" ({} KB/s)", speed_kb), Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+
+    if let Some((ref msg, ref ts)) = state.status_message {
+        if ts.elapsed().as_secs() < 4 {
+            title_spans.push(Span::raw(" | "));
+            title_spans.push(Span::styled(format!("🔔 {}", msg), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    let p = Paragraph::new(title_line).block(block);
+    let p = Paragraph::new(Line::from(title_spans)).block(block);
     f.render_widget(p, area);
 }
 
@@ -344,7 +379,7 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
         Color::DarkGray
     };
 
-    let header_cells = ["#", "Time", "PID", "Process", "Dir", "Protocol", "Size", "Preview"]
+    let header_cells = ["#", "Time", "PID", "Process", "Dir", "Protocol", "Secrets", "Size", "Preview"]
         .iter()
         .map(|h| Cell::from(*h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
     let header = Row::new(header_cells).height(1).bottom_margin(1);
@@ -374,13 +409,29 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             ProtocolType::RawTls => Style::default().fg(Color::DarkGray),
         };
 
+        // Scan secrets
+        let detected = scan_secrets(&ev.data);
+        let secret_badge = if !detected.is_empty() {
+            let label = match detected[0].kind {
+                crate::proto::secrets::SecretKind::JwtToken => "[JWT]",
+                crate::proto::secrets::SecretKind::CtfFlag => "[FLAG]",
+                crate::proto::secrets::SecretKind::BasicAuthCredentials => "[BASIC]",
+                crate::proto::secrets::SecretKind::AwsAccessKey => "[AWS]",
+                crate::proto::secrets::SecretKind::GitHubToken => "[GH-PAT]",
+                _ => "[SECRET]",
+            };
+            Cell::from(label).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        } else {
+            Cell::from("-").style(Style::default().fg(Color::DarkGray))
+        };
+
         // Construct short preview
         let preview = String::from_utf8_lossy(&ev.data)
             .lines()
             .next()
             .unwrap_or("")
             .chars()
-            .take(60)
+            .take(50)
             .collect::<String>();
 
         let time_str = format!("{:.3}s", (ev.timestamp_ns / 1_000_000) as f64 / 1000.0);
@@ -392,6 +443,7 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             Cell::from(ev.comm.clone()),
             Cell::from(dir_str).style(dir_style),
             Cell::from(proto_str).style(proto_style),
+            secret_badge,
             Cell::from(format!("{} B", ev.data.len())),
             Cell::from(preview),
         ];
@@ -403,12 +455,13 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
         rows,
         [
             Constraint::Length(5),
-            Constraint::Length(10),
+            Constraint::Length(9),
             Constraint::Length(8),
             Constraint::Length(14),
-            Constraint::Length(6),
-            Constraint::Length(10),
-            Constraint::Length(10),
+            Constraint::Length(5),
+            Constraint::Length(9),
+            Constraint::Length(9),
+            Constraint::Length(9),
             Constraint::Min(20),
         ],
     )
@@ -433,21 +486,33 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
 fn draw_details_and_hex(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
     let sub_chunks = Layout::default()
         .direction(LayoutDirection::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
 
     let maybe_event = state.selected_event();
 
-    // Left pane: Decoded Details & Protobuf tree
+    // Left pane: Multi-tab details inspector
     let left_border = if state.active_pane == ActivePane::DecodedDetails {
         Color::Cyan
     } else {
         Color::DarkGray
     };
 
+    let tab_titles = [" [1] Headers & Info ", " [2] Protobuf Tree ", " [3] JWT & Secrets ", " [4] cURL "]
+        .iter()
+        .enumerate()
+        .map(|(i, &title)| {
+            if i == state.selected_tab {
+                Span::styled(title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(title, Style::default().fg(Color::DarkGray))
+            }
+        })
+        .collect::<Vec<_>>();
+
     let details_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Protocol Dissection & Metadata ")
+        .title(Line::from(tab_titles))
         .border_style(Style::default().fg(left_border));
 
     if let Some(ev) = maybe_event {
@@ -469,49 +534,96 @@ fn draw_details_and_hex(f: &mut ratatui::Frame, state: &DashboardState, area: Re
 
         lines.push(Line::raw(""));
 
-        match ev.protocol() {
-            ProtocolType::Http1 => {
-                if let Some(msg) = Http1Parser::parse(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- HTTP/1.1 Header Dissection ---", Style::default().fg(Color::Cyan))));
-                    let (headers, body) = match msg {
-                        Http1Message::Request { headers, body, .. } => (headers, body),
-                        Http1Message::Response { headers, body, .. } => (headers, body),
-                    };
-                    for (k, v) in headers {
-                        lines.push(Line::from(vec![
-                            Span::styled(format!("  {}: ", k), Style::default().fg(Color::LightCyan)),
-                            Span::raw(v),
-                        ]));
+        match state.selected_tab {
+            0 => {
+                // Headers & Info
+                match ev.protocol() {
+                    ProtocolType::Http1 => {
+                        if let Some(msg) = Http1Parser::parse(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- HTTP/1.1 Header Dissection ---", Style::default().fg(Color::Cyan))));
+                            let (headers, body) = match msg {
+                                Http1Message::Request { headers, body, .. } => (headers, body),
+                                Http1Message::Response { headers, body, .. } => (headers, body),
+                            };
+                            for (k, v) in headers {
+                                lines.push(Line::from(vec![
+                                    Span::styled(format!("  {}: ", k), Style::default().fg(Color::LightCyan)),
+                                    Span::raw(v),
+                                ]));
+                            }
+                            if !body.is_empty() {
+                                lines.push(Line::raw(""));
+                                lines.push(Line::from(Span::styled(format!("--- Body ({} bytes) ---", body.len()), Style::default().fg(Color::Cyan))));
+                                lines.push(Line::from(String::from_utf8_lossy(&body).to_string()));
+                            }
+                        }
                     }
-                    if !body.is_empty() {
-                        lines.push(Line::raw(""));
-                        lines.push(Line::from(Span::styled(format!("--- Body ({} bytes) ---", body.len()), Style::default().fg(Color::Cyan))));
-                        lines.push(Line::from(String::from_utf8_lossy(&body).to_string()));
+                    ProtocolType::Grpc => {
+                        if let Ok((grpc_msg, _)) = GrpcMessage::parse(&ev.data) {
+                            lines.push(Line::from(Span::styled("--- gRPC Frame Dissection ---", Style::default().fg(Color::LightGreen))));
+                            lines.push(Line::from(format!("  Compressed: {}", grpc_msg.is_compressed)));
+                            lines.push(Line::from(format!("  Message Length: {} bytes", grpc_msg.length)));
+                        }
+                    }
+                    _ => {
+                        lines.push(Line::from(Span::styled("--- Raw Stream Payload ---", Style::default().fg(Color::DarkGray))));
+                        let text = String::from_utf8_lossy(&ev.data);
+                        for l in text.lines().take(15) {
+                            lines.push(Line::raw(format!("  {}", l)));
+                        }
                     }
                 }
             }
-            ProtocolType::Grpc => {
+            1 => {
+                // Protobuf Tree
                 if let Ok((grpc_msg, _)) = GrpcMessage::parse(&ev.data) {
-                    lines.push(Line::from(Span::styled("--- gRPC Frame Dissection ---", Style::default().fg(Color::LightGreen))));
-                    lines.push(Line::from(format!("  Compressed: {}", grpc_msg.is_compressed)));
-                    lines.push(Line::from(format!("  Message Length: {} bytes", grpc_msg.length)));
-
                     if let Ok(pb) = ProtobufMessage::decode(&grpc_msg.payload) {
-                        lines.push(Line::raw(""));
                         lines.push(Line::from(Span::styled("--- Protobuf Schema-less Tree ---", Style::default().fg(Color::Yellow))));
                         for line in pb.to_json().lines() {
                             lines.push(Line::raw(format!("  {}", line)));
                         }
                     }
+                } else if let Ok(pb) = ProtobufMessage::decode(&ev.data) {
+                    lines.push(Line::from(Span::styled("--- Protobuf Schema-less Tree ---", Style::default().fg(Color::Yellow))));
+                    for line in pb.to_json().lines() {
+                        lines.push(Line::raw(format!("  {}", line)));
+                    }
+                } else {
+                    lines.push(Line::raw("No Protocol Buffers payload detected."));
                 }
             }
-            _ => {
-                lines.push(Line::from(Span::styled("--- Raw Stream Payload ---", Style::default().fg(Color::DarkGray))));
-                let text = String::from_utf8_lossy(&ev.data);
-                for l in text.lines().take(15) {
-                    lines.push(Line::raw(format!("  {}", l)));
+            2 => {
+                // JWT & Secrets
+                let secrets = scan_secrets(&ev.data);
+                if secrets.is_empty() {
+                    lines.push(Line::raw("No sensitive tokens or JWTs detected in payload."));
+                } else {
+                    for (i, sec) in secrets.iter().enumerate() {
+                        lines.push(Line::from(vec![
+                            Span::styled(format!("[#{}] {:?}: ", i + 1, sec.kind), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            Span::raw(sec.raw_token.chars().take(40).collect::<String>()),
+                        ]));
+                        if let Some(ref details) = sec.decoded_details {
+                            for dl in details.lines() {
+                                lines.push(Line::from(Span::styled(format!("    {}", dl), Style::default().fg(Color::LightYellow))));
+                            }
+                        }
+                        lines.push(Line::raw(""));
+                    }
                 }
             }
+            3 => {
+                // cURL Command Preview
+                if let Some(curl_cmd) = CurlExporter::from_payload(&ev.data) {
+                    lines.push(Line::from(Span::styled("--- Ready-to-Run cURL Command ---", Style::default().fg(Color::Green))));
+                    for l in curl_cmd.lines() {
+                        lines.push(Line::raw(l.to_string()));
+                    }
+                } else {
+                    lines.push(Line::raw("Not an outbound HTTP request (cURL export available for requests only)."));
+                }
+            }
+            _ => {}
         }
 
         let p = Paragraph::new(lines).block(details_block).wrap(Wrap { trim: false });
@@ -583,17 +695,21 @@ fn draw_details_and_hex(f: &mut ratatui::Frame, state: &DashboardState, area: Re
 fn draw_footer(f: &mut ratatui::Frame, _state: &DashboardState, area: Rect) {
     let hotkeys = Line::from(vec![
         Span::styled("[q]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Quit  "),
-        Span::styled("[Space/p]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Pause/Resume  "),
+        Span::raw(" Quit "),
+        Span::styled("[Space]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" Pause "),
         Span::styled("[/]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Filter DSL  "),
-        Span::styled("[Tab]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Switch Pane  "),
-        Span::styled("[j/k]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Navigate  "),
+        Span::raw(" Filter "),
         Span::styled("[c]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Clear  "),
+        Span::raw(" Copy cURL "),
+        Span::styled("[e]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" Save HAR "),
+        Span::styled("[1-4]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" Tabs "),
+        Span::styled("[Tab]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" Panes "),
+        Span::styled("[j/k]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" Move "),
     ]);
     let p = Paragraph::new(hotkeys);
     f.render_widget(p, area);

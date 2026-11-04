@@ -142,3 +142,38 @@ fn test_huffman_stress_and_padding() {
         assert_eq!(String::from_utf8(dec).unwrap(), s);
     }
 }
+
+#[test]
+fn test_har_export_generation() {
+    use nullca::export::har::HarExporter;
+
+    let req = TlsEvent::new(
+        1700000000000000000,
+        5001,
+        5001,
+        7,
+        Direction::Egress,
+        "curl".into(),
+        b"GET /api/v2/stats HTTP/1.1\r\nHost: metrics.internal\r\nAccept: application/json\r\n\r\n".to_vec(),
+        Some(100),
+    );
+
+    let resp = TlsEvent::new(
+        1700000000050000000,
+        5001,
+        5001,
+        7,
+        Direction::Ingress,
+        "curl".into(),
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}".to_vec(),
+        Some(50000), // 50ms latency
+    );
+
+    let har = HarExporter::export_events(&[req, resp]);
+    assert_eq!(har.log.version, "1.2");
+    assert_eq!(har.log.creator.name, "nullca");
+    assert_eq!(har.log.entries.len(), 1);
+    assert_eq!(har.log.entries[0].request.method, "GET");
+    assert_eq!(har.log.entries[0].request.url, "https://metrics.internal/api/v2/stats");
+    assert_eq!(har.log.entries[0].response.status, 200);
+}

@@ -4,9 +4,12 @@ use nullca::bpf::loader::BpfLoader;
 use nullca::engine::discover::ProcessScanner;
 use nullca::engine::filter::FilterEngine;
 use nullca::engine::golang::GoSymbolTable;
+use nullca::engine::spawn::ProcessLauncher;
 use nullca::engine::symbols::ElfBinary;
+use nullca::export::har::HarExporter;
 use nullca::export::pcapng::PcapNgWriter;
 use nullca::export::terminal::TerminalFormatter;
+use nullca::proto::secrets::scan_secrets;
 use nullca::ui::dashboard::run_dashboard;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -30,7 +33,7 @@ enum Commands {
     #[command(alias = "ps")]
     List,
 
-    /// Trace decrypted TLS traffic in real-time
+    /// Trace decrypted TLS traffic of a running process in real-time
     Trace {
         /// Target Process ID (PID)
         #[arg(short, long)]
@@ -52,6 +55,10 @@ enum Commands {
         #[arg(long)]
         pcap: Option<PathBuf>,
 
+        /// Export decrypted HTTP sessions to HTTP Archive (HAR 1.2) JSON
+        #[arg(long)]
+        har: Option<PathBuf>,
+
         /// Output events as raw structured JSON lines
         #[arg(long)]
         json: bool,
@@ -63,6 +70,35 @@ enum Commands {
         /// Emulate live TLS traffic with synthetic frames for testing
         #[arg(long)]
         emulate: bool,
+    },
+
+    /// Spawn a target command and immediately trace its decrypted TLS activity
+    Run {
+        /// Launch interactive terminal cockpit dashboard (TUI)
+        #[arg(short, long)]
+        ui: bool,
+
+        /// Export decrypted sessions to Wireshark PCAP-NG file
+        #[arg(long)]
+        pcap: Option<PathBuf>,
+
+        /// Export decrypted HTTP sessions to HAR 1.2 format
+        #[arg(long)]
+        har: Option<PathBuf>,
+
+        /// Emulate live TLS traffic for testing
+        #[arg(long)]
+        emulate: bool,
+
+        /// Target command line to execute (e.g. -- curl -s https://api.github.com)
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+
+    /// Scan a file or dump for leaked JWT tokens, API keys, and CTF flags
+    ScanSecrets {
+        /// Path to target file
+        path: PathBuf,
     },
 
     /// Inspect dynamic and static symbols of an ELF binary or shared library
@@ -132,6 +168,86 @@ async fn main() -> anyhow::Result<()> {
                         lib.path.display().to_string().dimmed()
                     );
                 }
+            }
+        }
+
+        Commands::ScanSecrets { path } => {
+            println!("{} Scanning for secrets in: {}", "[*]".bold().blue(), path.display().to_string().cyan());
+            let bytes = std::fs::read(&path)?;
+            let secrets = scan_secrets(&bytes);
+
+            if secrets.is_empty() {
+                println!("{}", "No sensitive tokens or credentials detected.".green());
+                return Ok(());
+            }
+
+            println!("\n{} Detected {} sensitive token(s):", "[!]".bold().red(), secrets.len());
+            for (i, sec) in secrets.iter().enumerate() {
+                println!(
+                    "\n[{}] {} ({})",
+                    i + 1,
+                    format!("{:?}", sec.kind).bold().yellow(),
+                    sec.location.dimmed()
+                );
+                println!("  Raw Token: {}", sec.raw_token.cyan());
+                if let Some(ref details) = sec.decoded_details {
+                    for line in details.lines() {
+                        println!("    {}", line.dimmed());
+                    }
+                }
+            }
+        }
+
+        Commands::Run {
+            ui,
+            pcap,
+            har,
+            emulate,
+            command,
+        } => {
+            println!(
+                "{} Spawning and tracing command: {}",
+                "[+]".bold().green(),
+                command.join(" ").cyan()
+            );
+
+            let (tx, rx) = mpsc::channel(256);
+            let cmd_clone = command.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = ProcessLauncher::run_and_trace(&cmd_clone, tx, emulate).await {
+                    eprintln!("Error tracing spawned process: {}", e);
+                }
+            });
+
+            if ui {
+                run_dashboard(rx).await.map_err(|e| anyhow::anyhow!("{:?}", e))?;
+                return Ok(());
+            }
+
+            let mut pcap_writer = if let Some(ref pcap_path) = pcap {
+                Some(PcapNgWriter::create(pcap_path)?)
+            } else {
+                None
+            };
+
+            let mut captured_events = Vec::new();
+            let mut formatter = TerminalFormatter::new(false);
+            let mut mut_rx = rx;
+
+            while let Some(event) = mut_rx.recv().await {
+                if let Some(ref mut pw) = pcap_writer {
+                    let _ = pw.write_event(&event);
+                }
+                print!("{}", formatter.format_event(&event));
+                if har.is_some() {
+                    captured_events.push(event);
+                }
+            }
+
+            if let Some(har_path) = har {
+                HarExporter::write_to_file(&captured_events, har_path)?;
+                println!("{}", "[+] Exported sessions to HAR 1.2 successfully!".green());
             }
         }
 
@@ -223,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
             ui,
             filter,
             pcap,
+            har,
             json,
             hexdump,
             emulate,
@@ -276,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
+            let mut captured_events = Vec::new();
             let mut formatter = TerminalFormatter::new(hexdump);
             println!("{} Listening for decrypted TLS events...\n", "[*]".bold().blue());
 
@@ -298,6 +416,14 @@ async fn main() -> anyhow::Result<()> {
                     let formatted = formatter.format_event(&event);
                     print!("{}", formatted);
                 }
+
+                if har.is_some() {
+                    captured_events.push(event);
+                }
+            }
+
+            if let Some(har_path) = har {
+                let _ = HarExporter::write_to_file(&captured_events, har_path);
             }
         }
     }
