@@ -1,0 +1,33 @@
+[package]
+name = "nullca"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mikhael (MikhaelCat) <mikhaelcat@users.noreply.github.com>"]
+description = "⚡ Zero-CA eBPF Plaintext TLS, HTTP/2 & gRPC Sniffer & Wire Inspector in Pure Rust"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/MikhaelCat/nullca"
+keywords = ["ebpf", "tls", "uprobe", "sniffer", "http2"]
+categories = ["command-line-utilities", "development-tools::debugging", "network-programming"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.35", features = ["full"] }
+bytes = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "2.1"
+thiserror = "1.0"
+anyhow = "1.0"
+libc = "0.2"
+regex = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.9"
+
+[[bench]]
+name = "bench_parsers"
+harness = false
+
