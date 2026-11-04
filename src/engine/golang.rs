@@ -268,6 +268,59 @@ pub fn heuristic_disasm_go_prologue(code: &[u8]) -> GoRuntimeOffsets {
     offsets
 }
 
+/// Go ABIInternal register allocation for AArch64 (ARM64, Go 1.17+).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoArm64Register {
+    R0,  // Receiver / Return
+    R1,  // Arg 1
+    R2,  // Arg 2
+    R3,  // Arg 3
+    R4,  // Arg 4
+    R28, // Dedicated goroutine pointer runtime.g
+}
+
+impl GoArm64Register {
+    pub fn name(&self) -> &'static str {
+        match self {
+            GoArm64Register::R0 => "x0",
+            GoArm64Register::R1 => "x1",
+            GoArm64Register::R2 => "x2",
+            GoArm64Register::R3 => "x3",
+            GoArm64Register::R4 => "x4",
+            GoArm64Register::R28 => "x28",
+        }
+    }
+}
+
+/// Heuristically disassembles AArch64 function prologs (32-bit fixed width instructions).
+pub fn heuristic_disasm_go_arm64_prologue(code: &[u8]) -> GoRuntimeOffsets {
+    let mut offsets = GoRuntimeOffsets::default();
+    let limit = (code.len() / 4) * 4;
+
+    for i in (0..limit.min(64)).step_by(4) {
+        let insn = u32::from_le_bytes(code[i..i + 4].try_into().unwrap());
+
+        // LDR Xt, [Xn, #imm] 64-bit: 1111 1001 01xx xxxx xxxx xxxx xxxx xxxx
+        // Opcode mask for LDR 64-bit immediate: (insn & 0xFFC00000) == 0xF9400000
+        if (insn & 0xFFC00000) == 0xF9400000 {
+            let imm12 = (insn >> 10) & 0x0FFF;
+            let offset_bytes = imm12 * 8; // scaled by 8 for 64-bit register
+            if offset_bytes > 0 && offsets.conn_offset == 0 {
+                offsets.conn_offset = offset_bytes;
+            } else if offset_bytes > 0 && offsets.buf_offset == 0x20 {
+                offsets.buf_offset = offset_bytes;
+            }
+        }
+
+        // MRS Xt, TPIDR_EL0: D5 3B D0 40 to D5 3B D0 5F -> 0xD53BD040 mask
+        if (insn & 0xFFFF_FFE0) == 0xD53B_D040 {
+            offsets.g_tls_offset = 0; // Directly in TPIDR_EL0
+        }
+    }
+
+    offsets
+}
+
 /// Locates Go `.gopclntab` magic bytes in an ELF slice.
 fn find_pclntab_magic(data: &[u8]) -> Option<usize> {
     if data.len() < 16 {
@@ -338,5 +391,19 @@ mod tests {
         assert_eq!(offsets.g_tls_offset, -8);
         assert_eq!(offsets.conn_offset, 0x18);
         assert_eq!(offsets.buf_offset, 0x30);
+    }
+
+    #[test]
+    fn test_heuristic_disasm_arm64() {
+        // LDR X1, [X0, #24] (imm12 = 3 * 8 = 24 bytes) -> 0xF9400C01
+        // LDR X2, [X1, #48] (imm12 = 6 * 8 = 48 bytes) -> 0xF9401822
+        let arm_code = [
+            0x01, 0x0c, 0x40, 0xf9,
+            0x22, 0x18, 0x40, 0xf9,
+        ];
+
+        let offsets = heuristic_disasm_go_arm64_prologue(&arm_code);
+        assert_eq!(offsets.conn_offset, 24);
+        assert_eq!(offsets.buf_offset, 48);
     }
 }

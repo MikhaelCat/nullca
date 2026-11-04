@@ -253,6 +253,13 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
+
+    /// Launch embedded Web Cockpit dashboard and REST API daemon
+    Web {
+        /// Port to bind Web Cockpit HTTP server
+        #[arg(short, long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[tokio::main]
@@ -768,6 +775,30 @@ async fn main() -> anyhow::Result<()> {
                 "{} SSLKEYLOGFILE writer ready. Point Wireshark to this file: Edit -> Preferences -> Protocols -> TLS -> (Pre)-Master-Secret log filename",
                 "[+]".bold().green()
             );
+        }
+
+        Commands::Web { port } => {
+            let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let (tx, mut rx) = mpsc::channel(256);
+            let loader = BpfLoader::new(None);
+            let emul = !BpfLoader::has_bpf_capabilities();
+
+            tokio::spawn(async move {
+                let _ = loader.run_event_loop(None, tx, emul).await;
+            });
+
+            let ev_clone = std::sync::Arc::clone(&events);
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    let mut lock = ev_clone.lock().unwrap();
+                    lock.push(ev);
+                    if lock.len() > 1000 {
+                        lock.remove(0);
+                    }
+                }
+            });
+
+            nullca::ui::web::WebServer::start(port, events).await?;
         }
 
         Commands::Trace {

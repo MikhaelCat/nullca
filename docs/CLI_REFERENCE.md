@@ -20,6 +20,7 @@ nullca <COMMAND> [OPTIONS]
 | `export-openapi` | | Synthesize an OpenAPI 3.0 specification from captured HTTP HAR logs |
 | `audit` | | Run passive security posture, header hygiene, and secret leak audit |
 | `export-sslkeylog` | | Export TLS session secrets in standard NSS SSLKEYLOGFILE format for Wireshark |
+| `web` | | Launch embedded Web Cockpit dashboard and REST API daemon |
 | `replay` | | Replay and tamper an HTTP request against a target server with microsecond latency metrics |
 | `diff` | | Compare two intercepted packets, payload dumps, or HTTP messages side-by-side |
 | `scan-secrets` | | Scan a file or dump for leaked JWT tokens, API keys, and CTF flags |
@@ -99,7 +100,14 @@ Initializes standard NSS SSLKEYLOGFILE writer for Wireshark live decryption.
 nullca export-sslkeylog --output /tmp/nullca.keys
 ```
 
-### 8. `nullca replay`
+### 8. `nullca web`
+Launches the embedded zero-dependency Web Cockpit dashboard and REST API daemon.
+```bash
+nullca web --port 8080
+# Open http://localhost:8080 in any browser or mobile device
+```
+
+### 9. `nullca replay`
 Replays an HTTP request with custom headers or body, measuring sub-millisecond network timings (TTFB, connect latency).
 ```bash
 nullca replay --target 127.0.0.1:8080 --method POST --path /api/v1/login \

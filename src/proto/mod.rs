@@ -1,3 +1,4 @@
+pub mod compression;
 pub mod database;
 pub mod grpc;
 pub mod http1;
