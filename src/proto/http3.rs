@@ -133,7 +133,14 @@ impl Http3Parser {
                 None => break,
             };
             let payload_start = type_consumed + len_consumed;
-            let total_frame_len = payload_start + length as usize;
+            let length_usize = match usize::try_from(length) {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let total_frame_len = match payload_start.checked_add(length_usize) {
+                Some(len) => len,
+                None => break,
+            };
 
             if data.len() < total_frame_len {
                 break; // Incomplete frame

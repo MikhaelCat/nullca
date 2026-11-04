@@ -96,12 +96,26 @@ impl SseParser {
                 // Heuristic JSON content extraction: find "content":"..." or "delta":{"content":"..."}
                 if let Some(pos) = ev.data.find("\"content\":\"") {
                     let start = pos + 11;
-                    if let Some(end) = ev.data[start..].find('"') {
-                        let token = &ev.data[start..start + end];
-                        // Unescape common json escapes
-                        let unescaped = token.replace("\\n", "\n").replace("\\\"", "\"");
-                        accumulated.push_str(&unescaped);
+                    let bytes = &ev.data.as_bytes()[start..];
+                    let mut i = 0;
+                    let mut is_escaped = false;
+                    while i < bytes.len() {
+                        if is_escaped {
+                            is_escaped = false;
+                        } else if bytes[i] == b'\\' {
+                            is_escaped = true;
+                        } else if bytes[i] == b'"' {
+                            break;
+                        }
+                        i += 1;
                     }
+                    let token = &ev.data[start..start + i];
+                    let unescaped = token
+                        .replace("\\n", "\n")
+                        .replace("\\\"", "\"")
+                        .replace("\\\\", "\\")
+                        .replace("\\t", "\t");
+                    accumulated.push_str(&unescaped);
                 }
             } else if !ev.data.is_empty() {
                 accumulated.push_str(&ev.data);
@@ -143,5 +157,14 @@ mod tests {
 
         let full_text = SseParser::extract_ai_stream_text(&events);
         assert_eq!(full_text, "Hello world!");
+    }
+
+    #[test]
+    fn test_openai_streaming_token_with_escaped_quotes() {
+        let raw = br#"data: {"choices":[{"delta":{"content":"She said: \"Hello!\"\n"}}]}"#;
+        let events = SseParser::parse_stream(raw);
+        assert_eq!(events.len(), 1);
+        let extracted = SseParser::extract_ai_stream_text(&events);
+        assert_eq!(extracted, "She said: \"Hello!\"\n");
     }
 }

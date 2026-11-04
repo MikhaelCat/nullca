@@ -214,11 +214,11 @@ impl DnsParser {
     }
 
     fn read_resource_record(data: &[u8], mut offset: usize) -> Option<(DnsResourceRecord, usize)> {
+        let initial_offset = offset;
         let (name, consumed) = Self::read_domain_name(data, offset)?;
         offset += consumed;
-        let start_rr = offset;
 
-        if offset + 10 > data.len() {
+        if offset.checked_add(10).is_none_or(|end| end > data.len()) {
             return None;
         }
 
@@ -233,7 +233,10 @@ impl DnsParser {
         let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]) as usize;
         offset += 10;
 
-        if offset + rdlength > data.len() {
+        if offset
+            .checked_add(rdlength)
+            .is_none_or(|end| end > data.len())
+        {
             return None;
         }
 
@@ -282,7 +285,7 @@ impl DnsParser {
             }
         };
 
-        let total_consumed = (offset + rdlength) - (start_rr - consumed);
+        let total_consumed = (offset + rdlength) - initial_offset;
         Some((
             DnsResourceRecord {
                 name,
