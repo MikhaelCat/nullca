@@ -124,6 +124,23 @@ impl TerminalFormatter {
                     output.push_str(&Self::hexdump_preview(&msg.payload));
                 }
             }
+            ProtocolType::WebSocket => {
+                let frames = crate::proto::websocket::WebSocketParser::parse_all_frames(&event.data);
+                for frame in frames {
+                    output.push_str(&format!(
+                        "  [WebSocket Frame] Opcode:{} FIN:{} Masked:{} Len:{}\n",
+                        frame.opcode.to_string().cyan(),
+                        frame.fin,
+                        frame.masked,
+                        frame.payload_len
+                    ));
+                    if let Some(ref text) = frame.text_preview {
+                        output.push_str(&format!("  Payload: {}\n", text.green()));
+                    } else if !frame.payload.is_empty() {
+                        output.push_str(&Self::hexdump_preview(&frame.payload));
+                    }
+                }
+            }
             ProtocolType::RawTls => {
                 if self.show_hexdump {
                     output.push_str(&Self::hexdump(&event.data));

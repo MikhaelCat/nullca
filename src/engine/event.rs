@@ -20,6 +20,7 @@ pub enum ProtocolType {
     Http1,
     Http2,
     Grpc,
+    WebSocket,
     RawTls,
 }
 
@@ -29,6 +30,7 @@ impl std::fmt::Display for ProtocolType {
             ProtocolType::Http1 => write!(f, "HTTP/1.1"),
             ProtocolType::Http2 => write!(f, "HTTP/2"),
             ProtocolType::Grpc => write!(f, "gRPC"),
+            ProtocolType::WebSocket => write!(f, "WebSocket"),
             ProtocolType::RawTls => write!(f, "TLS-Plaintext"),
         }
     }
@@ -42,7 +44,7 @@ pub struct TlsEvent {
     pub fd: i32,
     pub direction: Direction,
     pub comm: String,
-    #[serde(skip_serializing)]
+    #[serde(default, skip_serializing)]
     pub data: Vec<u8>,
     pub data_len: usize,
     pub latency_us: Option<u64>,
@@ -88,7 +90,7 @@ impl TlsEvent {
             b"GET ", b"POST ", b"PUT ", b"DELETE ", b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ",
             b"HTTP/1.",
         ];
-        if http1_verbs.iter().any(|verb| slice.starts_with(*verb)) {
+        if http1_verbs.iter().any(|verb| slice.starts_with(verb)) {
             return ProtocolType::Http1;
         }
 
@@ -104,6 +106,11 @@ impl TlsEvent {
                 }
                 return ProtocolType::Http2;
             }
+        }
+
+        // Check RFC 6455 WebSocket framing
+        if crate::proto::websocket::WebSocketParser::is_probable_websocket(slice) {
+            return ProtocolType::WebSocket;
         }
 
         ProtocolType::RawTls

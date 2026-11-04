@@ -15,18 +15,19 @@
                                      ░                  
 ```
 
-**Zero-CA eBPF Plaintext TLS, HTTP/2 & gRPC Wire Inspector, Spawn-Tracer & Interactive Cockpit in Pure Rust**
+**Zero-CA eBPF Plaintext TLS, HTTP/2, WebSocket & gRPC Wire Inspector, Live Replayer & Diff Engine in Pure Rust**
 
 [![Rust](https://img.shields.io/badge/Rust-2021_Edition-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![eBPF](https://img.shields.io/badge/eBPF-Uprobes_&_RingBuf-blue.svg?style=flat-square&logo=linux)](https://ebpf.io/)
 [![TUI](https://img.shields.io/badge/Cockpit-Ratatui_Interactive_TUI-yellow.svg?style=flat-square)](#-interactive-terminal-cockpit)
-[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20gRPC%20|%20Protobuf-emerald.svg?style=flat-square)](#-deep-protocol-dissectors)
+[![Protocols](https://img.shields.io/badge/Protocols-HTTP%2F1.1%20|%20HTTP%2F2%20|%20WebSocket%20|%20gRPC-emerald.svg?style=flat-square)](#-deep-protocol-dissectors)
 [![Secrets](https://img.shields.io/badge/Secrets-JWT_&_Token_Dissector-red.svg?style=flat-square)](#-automated-jwt--secret-credential-dissector)
-[![Export](https://img.shields.io/badge/Export-cURL_|_HAR_1.2_|_PCAP--NG-cyan.svg?style=flat-square)](#-copy-as-curl--har-12-export)
-[![License](https://img.shields.io/badge/License-MIT-purple.svg?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20x86__64-black.svg?style=flat-square&logo=linux)](https://kernel.org/)
+[![Diff](https://img.shields.io/badge/Diff-Side--by--Side_Engine-purple.svg?style=flat-square)](#-side-by-side--unified-packet-diff-engine)
+[![IPC](https://img.shields.io/badge/IPC-Unix_Socket_Streaming-cyan.svg?style=flat-square)](#-unix-domain-socket-ipc-streaming)
+[![Export](https://img.shields.io/badge/Export-cURL_|_HAR_1.2_|_PCAP--NG-lightgrey.svg?style=flat-square)](#-copy-as-curl--har-12-export)
+[![License](https://img.shields.io/badge/License-MIT-black.svg?style=flat-square)](LICENSE)
 
-[Why nullca?](#-why-nullca) • [Features](#-key-features) • [Architecture](#-architecture) • [Spawn & Trace](#-spawn--trace-mode) • [Interactive TUI](#-interactive-terminal-cockpit) • [Secrets Dissector](#-automated-jwt--secret-credential-dissector) • [cURL & HAR Export](#-copy-as-curl--har-12-export) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
+[Why nullca?](#-why-nullca) • [Key Features](#-key-features) • [Architecture](#-architecture) • [Spawn & Trace](#-spawn--trace-mode) • [Interactive Cockpit](#-interactive-terminal-cockpit) • [Packet Diff](#-side-by-side--unified-packet-diff-engine) • [Live Replay](#-live-request-replay--tampering) • [IPC Streaming](#-unix-domain-socket-ipc-streaming) • [Benchmarks](#-benchmarks) • [CLI Reference](#-cli-reference)
 
 </div>
 
@@ -34,14 +35,18 @@
 
 ## 💡 Why nullca?
 
-Debugging, reverse-engineering, and inspecting encrypted HTTPS, HTTP/2, and gRPC traffic inside microservices, Docker containers, Kubernetes pods, or CLI tools has traditionally been painful:
+Debugging, reverse-engineering, and inspecting encrypted HTTPS, HTTP/2, WebSocket, and gRPC traffic inside microservices, Docker containers, Kubernetes pods, or CLI tools has traditionally been painful:
 
 | Pain Point | Burp Suite / mitmproxy | ⚡ **nullca** |
 | :--- | :--- | :--- |
 | **Root CA Installation** | ❌ Required in host/container trust stores | ✅ **Zero CA configuration** |
 | **Certificate Pinning** | ❌ Hard breaks connections (Go, BoringSSL, apps) | ✅ **100% immune** (hooks memory post-decrypt) |
 | **Stripped Go Binaries** | ❌ Bypasses system trust stores; custom crypto runtime | ✅ **Direct `.gopclntab` parsing & ABIInternal register hooks** |
+| **WebSocket Inspection** | ⚠️ Frame masking complicates manual review | ✅ **Full RFC 6455 unmasking, defragmentation & JSON parsing** |
 | **One-Off Command Tracing** | ❌ Must configure proxy environment variables | ✅ **`nullca run -- <cmd>`** spawns & traces instantly |
+| **Request Comparison** | ⚠️ Clunky manual diffing across tabs | ✅ **Built-in Side-by-Side Myers Diff Engine (`[d]`)** |
+| **Tampering & Replay** | ⚠️ Heavy GUI required | ✅ **Microsecond live request retransmission (`[r]`)** |
+| **External Scripting** | ⚠️ Complex Python addon APIs | ✅ **`/tmp/nullca.sock` UNIX IPC daemon streaming NDJSON** |
 | **gRPC Payloads** | ⚠️ Opaque binary blobs without `.proto` files | ✅ **Schema-less Protobuf wire format dissector** |
 | **Token & Secret Leakage** | ⚠️ Manual searching across raw request tabs | ✅ **Automatic JWT claims, AWS keys, CTF flags scanner** |
 | **Tool Interoperability** | ⚠️ Proprietary formats | ✅ **Instant "Copy as cURL", HAR 1.2, and PCAP-NG** |
@@ -62,8 +67,55 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
 
 ### 🖥️ Interactive Terminal Cockpit ("Wireshark for CLI")
 - Built with **Ratatui** and **Crossterm** for real-time terminal wire inspection.
-- Split-pane layout: Live packet stream table, decoded header inspector, schema-less Protobuf tree, and colorized ASCII/Hexdump viewer.
-- Keyboard-driven workflow: hotkey pause/resume (`[Space]`), stream filtering (`[/]`), pane navigation (`[Tab]`), copy as cURL (`[c]`), export HAR (`[e]`), and clear (`[x]`).
+- Split-pane layout: Live packet stream table, decoded header inspector, schema-less Protobuf tree, WebSocket viewer, side-by-side diff inspector, and colorized ASCII/Hexdump viewer.
+- Keyboard-driven workflow:
+  - `[Space]` / `[p]`: Pause / resume capture stream
+  - `[/]`: Live Query Filter DSL
+  - `[Tab]`: Switch active pane focus
+  - `[c]`: Generate and copy "Copy as cURL" command
+  - `[r]`: Instant non-blocking request replay to remote server
+  - `[d]`: Mark baseline packet 📌 / toggle Side-by-Side Diff Inspector
+  - `[e]`: Export session to HTTP Archive (HAR 1.2) JSON
+  - `[x]`: Clear capture buffers
+  - `[1-6]`: Switch detail tabs (`[1] Headers`, `[2] Protobuf`, `[3] Secrets`, `[4] cURL`, `[5] WebSocket`, `[6] Diff`)
+
+### 🔍 Side-by-Side & Unified Packet Diff Engine
+- Built-in **Myers / LCS diff algorithm** in pure Rust:
+  - Compare any two intercepted packets directly in the terminal cockpit by pressing `[d]` to set a baseline 📌 and `[d]` on another packet to inspect differences.
+  - Structure-aware diffing: highlights added/removed headers, changed values (`old -> new`), and computes line-by-line colored diffs of formatted JSON or plaintext bodies.
+  - CLI command: compare two raw files or packet dumps:
+    ```bash
+    nullca diff packet_a.txt packet_b.txt
+    ```
+
+### ⚡ Live Request Replay & Tampering
+- Replay any intercepted HTTP request with microsecond-precision latency telemetry:
+  ```bash
+  nullca replay --target api.github.com:443 --method GET --path /user -H "Authorization: Bearer token"
+  nullca replay --target 127.0.0.1:8080 --raw-file request.raw
+  ```
+- Measures and prints DNS connect latency, Time-To-First-Byte (TTFB), total roundtrip duration, response headers, and syntax-highlighted response bodies.
+- Triggered instantly inside the Cockpit by pressing `[r]` on any selected request packet.
+
+### 🌐 RFC 6455 WebSocket Dissector & Frame Assembler
+- Complete WebSocket protocol dissection:
+  - Parses Frame Header: `FIN`, `RSV1-3`, `Opcode` (`Continuation`, `Text`, `Binary`, `Close`, `Ping`, `Pong`).
+  - Automatic 4-byte masking key extraction and zero-copy payload unmasking (`payload[i] ^ mask[i % 4]`).
+  - Handles 7-bit, 16-bit extended (`0x7E`), and 64-bit extended (`0x7F`) payload lengths.
+  - Multi-frame defragmentation: seamlessly reassembles split fragmented WebSocket messages across frames.
+  - Dissects Close status codes (1000 Normal, 1001 Going Away, 1006 Abnormal, 1011 Server Error) and reason strings.
+  - Automatic JSON heuristic detection on WebSocket payloads.
+
+### 🔌 Unix Domain Socket IPC Streaming Daemon
+- Stream live decrypted TLS events from background NullCA daemons to external scripts, Python/pwntools bots, or terminal monitors:
+  ```bash
+  # Start trace with IPC socket broadcast
+  sudo nullca trace --socket /tmp/nullca.sock -p 1420
+
+  # Connect and stream live NDJSON without root privileges
+  nullca stream --socket /tmp/nullca.sock --json | jq .
+  ```
+- Enables automated CTF flag extractors, Discord/Telegram alert webhooks, and live penetration-testing pipelines.
 
 ### 🔑 Automated JWT & Secret Credential Dissector
 - Real-time scanner for sensitive credentials in requests and responses:
@@ -92,7 +144,7 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
 ### 🔍 Wire-Speed Filter DSL
 - In-memory query expression engine with a custom lexer and recursive descent AST evaluator:
   ```sql
-  proto == "http2" && (status >= 400 || body contains "token") && len > 64
+  proto == "websocket" || (proto == "http2" && status >= 400 && body contains "token")
   ```
 
 ---
@@ -128,18 +180,14 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
                              │  Stream Reassembler   │ (pid, fd, direction)
                              └───────────┬───────────┘
                                          │
-          ┌──────────────────────────────┼──────────────────────────────┐
-          ▼                              ▼                              ▼
- ┌─────────────────┐           ┌───────────────────┐          ┌───────────────────┐
- │ HTTP/1.1 Engine │           │   HTTP/2 Engine   │          │    gRPC Engine    │
- │ (Chunked / Msg) │           │ (HPACK + Huffman) │          │(5-byte Frame Unp.)│
- └────────┬────────┘           └─────────┬─────────┘          └─────────┬─────────┘
-          │                              │                              │
-          │                    ┌─────────▼─────────┐          ┌─────────▼─────────┐
-          │                    │  H2 Multiplexer   │          │ Schema-less Proto │
-          │                    │ (Stream ID Table) │          │  Wire Dissector   │
-          │                    └─────────┬─────────┘          └─────────┬─────────┘
-          └──────────────────────────────┼──────────────────────────────┘
+        ┌───────────────────┬────────────┴───────┬───────────────────┐
+        ▼                   ▼                    ▼                   ▼
+ ┌─────────────┐     ┌──────────────┐     ┌─────────────┐     ┌──────────────┐
+ │   HTTP/1    │     │    HTTP/2    │     │  WebSocket  │     │     gRPC     │
+ │ (Chunk/Msg) │     │(HPACK+Huffm) │     │ (RFC 6455)  │     │(Proto Wire)  │
+ └──────┬──────┘     └──────┬───────┘     └──────┬──────┘     └──────┬───────┘
+        │                   │                    │                   │
+        └───────────────────┴────────────┬───────┴───────────────────┘
                                          ▼
                              ┌───────────────────────┐
                              │  JWT & Secrets Engine │ (Auto Base64URL Dec.)
@@ -149,12 +197,12 @@ Instead of acting as an invasive man-in-the-middle proxy, `nullca` attaches **Li
                              │   Filter DSL Engine   │ (In-memory AST)
                              └───────────┬───────────┘
                                          │
-          ┌──────────────────────────────┼──────────────────────────────┐
-          ▼                              ▼                              ▼
- ┌─────────────────────────────────┐ ┌────────────────────┐ ┌────────────────────┐
- │  Ratatui Interactive Cockpit    │ │   PCAP-NG Writer   │ │   HAR 1.2 Export   │
- │ (Live Table, Tree, Hex Viewer)  │ │ (Wireshark Stream) │ │(Chrome / Burp /..) │
- └─────────────────────────────────┘ └────────────────────┘ └────────────────────┘
+           ┌─────────────────────────────┼─────────────────────────────┐
+           ▼                             ▼                             ▼
+ ┌───────────────────┐         ┌───────────────────┐         ┌───────────────────┐
+ │ Ratatui Cockpit   │         │ Unix IPC Stream   │         │ Replay & Tamper   │
+ │ (Diff, Tabs, TUI) │         │ (/tmp/nullca.sock)│         │ (Latency Stats)   │
+ └───────────────────┘         └───────────────────┘         └───────────────────┘
 ```
 
 ---
@@ -165,10 +213,10 @@ Spawn any command and trace its decrypted network activity immediately:
 
 ```bash
 # Run curl and launch interactive TUI cockpit
-sudo ./target/release/nullca run --ui -- curl -s https://api.github.com/user
+sudo nullca run --ui -- curl -s https://api.github.com/user
 
 # Run a Go binary or CTF client and dump to HAR
-sudo ./target/release/nullca run --har session.har -- ./ctf_challenge_binary
+sudo nullca run --har session.har -- ./ctf_challenge_binary
 ```
 
 ---
@@ -178,71 +226,104 @@ sudo ./target/release/nullca run --har session.har -- ./ctf_challenge_binary
 Launch the full interactive TUI dashboard:
 
 ```bash
-sudo ./target/release/nullca trace -p 1420 --ui
+sudo nullca trace -p 1420 --ui
 ```
 
 ```text
-┌─ ⚡ nullca v0.1.0 • eBPF TLS/HTTP2/gRPC Sniffer | [LIVE CAPTURE] | Pkts: 42 | Traffic: 1.28 MB ──────────┐
-│ Filter [/] : proto == "http2" && (status >= 400 || body contains "auth")                                 │
-├─ Live Streams ────────────────────────────────────────────────────────────────────────────────────────────┤
-│ #   Time     PID     Process        Dir  Protocol  Secrets   Size     Preview                             │
-│ ▶ 1 0.042s   1420    curl           OUT  HTTP/2    -         180 B    PRI * HTTP/2.0... :method: GET /api │
-│   2 0.089s   1420    curl           IN   HTTP/2    [JWT]     1.2 KB   :status: 200 content-type: app/json │
-│   3 0.145s   3891    backend-go     IN   gRPC      [FLAG]    48 B     GrpcMessage(compressed: false, len) │
-├─ [1] Headers & Info  [2] Protobuf Tree  [3] JWT & Secrets  [4] cURL ────────┬─ Raw Hex & ASCII Dump ──────┤
-│ Process: curl (PID: 1420)  Socket FD: 3                                     │ 00000000: 50 52 49 20 |PRI |│
-│ Protocol: Http2  Payload Size: 180 bytes                                    │ 00000008: 54 50 2f 32 |TP/2|│
-│                                                                             │                             │
-│ [#1] JwtToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...                      │                             │
-│     HEADER: {"alg": "HS256", "typ": "JWT"}                                  │                             │
-│     CLAIMS (PAYLOAD):                                                       │                             │
-│       "sub": "admin_user",                                                  │                             │
-│       "role": "cluster-admin",                                              │                             │
-│       "exp": 1798765432                                                     │                             │
-└─────────────────────────────────────────────────────────────────────────────┴─────────────────────────────┘
- [q] Quit  [Space] Pause  [/] Filter  [c] Copy cURL  [e] Save HAR  [1-4] Tabs  [Tab] Panes  [j/k] Move
+┌─ ⚡ NullCA Cockpit ─ eBPF Plaintext TLS, HTTP/2 & WebSocket Inspector  [LIVE]  [BASE: #1] ────────────────┐
+│ Filter [/] : proto == "websocket" || status >= 400                                                        │
+├─ Captured Decrypted Packets ──────────────────────────────────────────────────────────────────────────────┤
+│ #     DIR  PROTO    PROCESS        PID      SIZE       SECURITY   PAYLOAD PREVIEW                         │
+│ 📌 #1 OUT  HTTP/1.1 curl           1420     180 B      -          POST /api/v1/auth HTTP/1.1              │
+│ ▶  #2 IN   HTTP/1.1 curl           1420     1.2 KB     [JWT]      HTTP/1.1 200 OK Content-Type: app/json  │
+│    #3 OUT  WS       binance-bot    3891     64 B       -          [TEXT] {"action":"subscribe"}           │
+│    #4 IN   WS       binance-bot    3891     128 B      -          [JSON] {"event":"subscribed","chan":1}  │
+├─ [1] Headers & Info  [2] Protobuf  [3] JWT & Secrets  [4] cURL  [5] WebSocket  [6] Diff ───┬─ Hexdump ────┤
+│ Process: curl (PID: 1420)  Socket FD: 3                                                    │ 00000000: ...│
+│ Protocol: Http1  Payload Size: 1240 bytes                                                  │ 00000010: ...│
+│                                                                                            │              │
+│ Detected 1 sensitive token(s):                                                             │              │
+│   Type: JwtToken (Offset: 120)                                                             │              │
+│   Raw: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...                                             │              │
+│   HEADER: {"alg": "HS256", "typ": "JWT"}                                                   │              │
+│   CLAIMS: {"sub": "root", "role": "admin", "exp": 1798765432}                              │              │
+└────────────────────────────────────────────────────────────────────────────────────────────┴──────────────┘
+ [q] Quit  [Space] Pause  [/] Filter  [c] cURL  [r] Replay  [d] Diff  [e] HAR  [1-6] Tabs  [Tab] Panes  [j/k] Move
 ```
 
 ---
 
-## 🔍 Packet Filter DSL
+## 🔍 Side-by-Side & Unified Packet Diff Engine
+
+Compare two requests or responses side-by-side to understand authentication divergences, rate limit triggers, or parameter changes:
 
 ```bash
-# Filter for HTTP/2 errors
-nullca trace --ui -f 'proto == "http2" && status >= 400'
+# Compare two intercepted HTTP requests
+nullca diff req1.txt req2.txt
+```
 
-# Trace specific process with body content filter
-nullca trace --ui -f 'comm == "envoy" && body contains "Authorization"'
+*Inside Cockpit:*
+1. Highlight any packet and press `[d]` to set baseline 📌.
+2. Navigate to another packet and press `[d]` to open the **Diff Inspector** tab!
+3. View highlighted header additions (`+`), removals (`-`), modified values (`old -> new`), and JSON body diffs.
+4. Press `[Esc]` to clear baseline.
 
-# Validate filter syntax via CLI
-nullca eval-filter 'pid == 1234 && (proto == "grpc" || len > 512)'
+---
+
+## ⚡ Live Request Replay & Tampering
+
+Retransmit requests directly from the CLI or within the Cockpit:
+
+```bash
+# Replay against API endpoint
+nullca replay --target api.github.com:443 --method GET --path /zen -H "User-Agent: nullca/0.1.0"
+
+# Replay from captured raw request file
+nullca replay --target 127.0.0.1:8080 --raw-file /path/to/request.raw
+```
+
+*Output:*
+```text
+[*] Preparing request replay to target: api.github.com:443
+[+] Transmitting: GET /zen (Host: api.github.com:443)
+
+=== Replay Response ===
+Status: 200 OK
+Timing: Connect: 12.40ms | TTFB: 28.50ms | Total: 41.20ms
+
+--- Headers ---
+content-type: text/plain;charset=utf-8
+server: github.com
+
+--- Body (23 bytes) ---
+Practicality beats purity.
 ```
 
 ---
 
-## 🔑 Scan Files for Secrets & Credentials
+## 🔌 Unix Domain Socket IPC Streaming
 
-Scan any packet dump, memory image, or log file directly for leaked tokens:
+Stream live decrypted TLS events into external pipelines, Python scripts, or custom alert bots:
 
 ```bash
-nullca scan-secrets /path/to/capture.dump
+# Terminal 1: Run trace with IPC socket broadcast
+sudo nullca trace -p 1420 --socket /tmp/nullca.sock
+
+# Terminal 2: Stream live NDJSON without root
+nullca stream --socket /tmp/nullca.sock --json | jq '{comm, proto, data_len}'
 ```
 
-*Sample Output:*
-```text
-[*] Scanning for secrets in: /path/to/capture.dump
+*Python Integration Example:*
+```python
+import socket, json
 
-[!] Detected 2 sensitive token(s):
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect("/tmp/nullca.sock")
+file_obj = sock.makefile("r")
 
-[1] JwtToken (Offset: 142)
-  Raw Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3...
-    HEADER:
-    { "alg": "HS256", "typ": "JWT" }
-    CLAIMS (PAYLOAD):
-    { "sub": "admin_user", "role": "superuser" }
-
-[2] CtfFlag (Offset: 512)
-  Raw Token: flag{ebpf_zero_ca_memory_inspection_ftw}
+for line in file_obj:
+    event = json.loads(line)
+    print(f"[{event['comm']}] {event['direction']} {event['data_len']} bytes")
 ```
 
 ---
@@ -274,9 +355,13 @@ Commands:
   list (ps)     List active system processes linked with detectable TLS runtimes
   trace         Trace decrypted TLS traffic of a running process in real-time
   run           Spawn a target command and immediately trace its decrypted TLS activity
+  stream        Stream live decrypted events from a background NullCA daemon socket
+  replay        Replay and tamper an HTTP request against a target server with microsecond latency metrics
+  diff          Compare two intercepted packets, payload dumps, or HTTP messages side-by-side
+  completions   Generate shell autocompletion script (bash, zsh, fish, powershell)
   scan-secrets  Scan a file or dump for leaked JWT tokens, API keys, and CTF flags
   inspect-elf   Inspect dynamic and static symbols of an ELF binary or shared library
-  inspect-go    Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions
+  inspect-go    Dissect Go runtime PCLNTAB (.gopclntab) and ABIInternal conventions in Go binaries
   eval-filter   Test and validate a Filter DSL expression
   compile-bpf   Compile kernel eBPF C probes to BPF bytecode using clang
 ```

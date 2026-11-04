@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "development-tools::debugging", "network
 
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
 tokio = { version = "1.35", features = ["full"] }
 bytes = "1.5"
 serde = { version = "1.0", features = ["derive"] }

@@ -5,10 +5,12 @@ pub mod proto;
 pub mod ui;
 
 pub use bpf::loader::BpfLoader;
+pub use engine::diff::{DiffEngine, DiffKind, DiffLine, EventDiffResult};
 pub use engine::discover::{ProcessScanner, TargetProcess, TlsFlavor};
 pub use engine::event::{Direction, ProtocolType, TlsEvent};
 pub use engine::filter::FilterEngine;
 pub use engine::golang::GoSymbolTable;
+pub use engine::ipc::{IpcClient, IpcServer, DEFAULT_SOCKET_PATH};
 pub use engine::replay::{ReplayEngine, ReplayRequest, ReplayResponse};
 pub use engine::spawn::ProcessLauncher;
 pub use engine::symbols::ElfBinary;
@@ -24,3 +26,4 @@ pub use proto::multiplexer::Http2Session;
 pub use proto::protobuf::ProtobufMessage;
 pub use proto::reassembler::StreamReassembler;
 pub use proto::secrets::{scan_secrets, DetectedSecret, SecretDetector, SecretKind};
+pub use proto::websocket::{WebSocketAssembler, WebSocketFrame, WebSocketOpcode, WebSocketParser};

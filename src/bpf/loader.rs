@@ -53,6 +53,11 @@ impl BpfLoader {
         Ok(())
     }
 
+    /// Check if clang compiler is present on PATH
+    pub fn has_clang_installed() -> bool {
+        Command::new("clang").arg("--version").output().is_ok()
+    }
+
     /// Check if tracing and uprobe permissions are available
     pub fn has_bpf_capabilities() -> bool {
         (unsafe { libc::geteuid() == 0 }) || Path::new("/sys/kernel/tracing/uprobe_events").exists()

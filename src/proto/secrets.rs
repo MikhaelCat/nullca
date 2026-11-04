@@ -55,7 +55,15 @@ impl SecretDetector {
             ctf_flag_regex: Regex::new(r"(?i)(flag\{[^\{\}]{4,64}\}|THEM\{[^\{\}]{4,64}\}|ctf\{[^\{\}]{4,64}\})").unwrap(),
         }
     }
+}
 
+impl Default for SecretDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SecretDetector {
     /// Scans a byte payload for all detectable secrets and credentials.
     pub fn scan_payload(&self, data: &[u8]) -> Vec<DetectedSecret> {
         let text = String::from_utf8_lossy(data);

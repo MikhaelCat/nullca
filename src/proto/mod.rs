@@ -6,3 +6,4 @@ pub mod multiplexer;
 pub mod protobuf;
 pub mod reassembler;
 pub mod secrets;
+pub mod websocket;
