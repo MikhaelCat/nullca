@@ -243,3 +243,39 @@ fn test_dashboard_idor_detection_and_drop_counter() {
     // Packet index 3 (the response) should be tagged with IDOR alert
     assert!(state.idor_event_indices.contains(&3));
 }
+
+#[test]
+fn test_dashboard_throughput_sparkline_accumulation() {
+    let mut state = DashboardState::new();
+
+    // Push events with data
+    for i in 0..10 {
+        let ev = TlsEvent::new(
+            1000 + i as u64,
+            123,
+            123,
+            3,
+            Direction::Egress,
+            "bench".into(),
+            vec![0x41; 2048], // 2 KB each
+            None,
+        );
+        state.push_event(ev);
+    }
+
+    assert_eq!(state.total_bytes, 20480);
+    assert!(state.bytes_in_current_interval > 0 || !state.throughput_history.is_empty());
+
+    // Force time elapse to verify sparkline bucket push
+    state.last_sparkline_sample = std::time::Instant::now() - std::time::Duration::from_millis(600);
+    state.update_throughput_sparkline();
+
+    assert!(
+        !state.throughput_history.is_empty(),
+        "Sparkline history should contain samples"
+    );
+    assert_eq!(
+        state.bytes_in_current_interval, 0,
+        "Current interval counter should reset"
+    );
+}

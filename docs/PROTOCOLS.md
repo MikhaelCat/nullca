@@ -29,10 +29,18 @@ NullCA includes built-in, zero-dependency dissectors for modern web and applicat
 
 ---
 
-## 3. HTTP/3 & QPACK Decompressor (`src/proto/qpack.rs`)
-- **RFC 9204 Static Table**: Full 99-entry static lookup table for common HTTP/3 headers (`:method`, `:path`, `:status`, `strict-transport-security`, etc.).
-- **Indexed & Literal Header Field Decoding**: Decodes indexed representations (`1xxxxxxx`), literal fields with static/dynamic name reference, and literal fields with literal names.
-- **Canonical Huffman Integration**: Seamlessly decodes 8-bit clean Huffman strings using RFC 7541/9204 code trees.
+## 3. HTTP/3 & QUIC Frame Engine (`src/proto/http3.rs`, `src/proto/qpack.rs`)
+- **RFC 9114 HTTP/3 Frame Parsing**:
+  - `DATA` (0x00): Plaintext application payload extraction.
+  - `HEADERS` (0x01): QPACK-encoded request and response header fields.
+  - `CANCEL_PUSH` (0x03), `SETTINGS` (0x04), `PUSH_PROMISE` (0x05), `GOAWAY` (0x07), `MAX_PUSH_ID` (0x0D).
+- **RFC 9000 QUIC Variable-Length Integer Codec**:
+  - Decodes 62-bit variable integers with 2-bit prefix masks (`00` for 1 byte, `01` for 2 bytes, `10` for 4 bytes, `11` for 8 bytes).
+  - Handles frame length and stream identifier varints without memory allocations.
+- **RFC 9204 QPACK Decompressor (`src/proto/qpack.rs`)**:
+  - Full 99-entry static lookup table for common HTTP/3 headers (`:method`, `:path`, `:status`, `strict-transport-security`, etc.).
+  - Indexed (`1xxxxxxx`), literal with static name reference, and literal with literal name decoders.
+  - Canonical RFC 7541/9204 Huffman code tree decompression.
 
 ---
 
@@ -102,4 +110,36 @@ NullCA includes built-in, zero-dependency dissectors for modern web and applicat
 - **Active Connection Table**: Bounds maximum concurrent stream reassembly to prevent memory exhaustion attacks.
 - **Stale Pruning (`prune_stale`)**: Evicts inactive connection buffers exceeding configurable TTLs.
 - **LRU Fallback**: Evicts oldest connection when reaching table capacity.
+- **RFC 7230 §3.3.3 Delimitation Rules**:
+  - `Content-Length` accumulation.
+  - `Transfer-Encoding: chunked` termination detection (`0\r\n\r\n`).
+  - `Connection: close` EOF-delimited responses: waits for socket connection close / `flush_connection()` without premature truncation.
+  - HTTP 1xx, 204 (No Content), and 304 (Not Modified) zero-body immediate completion.
 - **Zero-Residual Memory**: Automatically cleans up and frees connection map entries when fragmented messages are fully reassembled and drained.
+
+---
+
+## 10. DNS & DNS-over-HTTPS (DoH) Wire Dissector (`src/proto/dns.rs`)
+- **RFC 1035 & RFC 8484 Wire Format**: Dissects native port 53 UDP/TCP DNS packets as well as HTTP/2 and HTTP/3 `application/dns-message` DoH queries and responses.
+- **QNAME Decompression Jump Table**:
+  - Decodes standard label sequences (e.g. `\x03www\x06google\x03com\x00`).
+  - Resolves recursive compression pointers (`0xC000` bitmask) with depth loop protection.
+- **Supported Resource Record (RR) Types**:
+  - `A` (IPv4 address resolution)
+  - `AAAA` (IPv6 128-bit address resolution)
+  - `CNAME` (Canonical name alias pointer)
+  - `TXT` (SPF, DKIM, verification strings)
+  - `MX` (Mail exchange preference & hostname)
+  - `NS`, `PTR`, `SRV`, `SOA`
+- **DNS Flags & RCODE**: Query/Response (QR), Opcode, Authoritative Answer (AA), Truncation (TC), Recursion Desired (RD), Recursion Available (RA), Response Code (NoError, FormErr, ServFail, NXDomain).
+
+---
+
+## 11. Server-Sent Events (SSE) & AI Streaming Token Dissector (`src/proto/sse.rs`)
+- **RFC 8895 Stream Parser**:
+  - Parses streaming HTTP responses with `Content-Type: text/event-stream`.
+  - Dissects field prefixes: `event:`, `data:`, `id:`, and `retry:`.
+- **AI / LLM Streaming Token Reconstruction**:
+  - Automatically identifies OpenAI ChatGPT, Anthropic Claude, and Ollama streaming chunks (`data: {"choices":[{"delta":{"content":"..."}}]}`).
+  - Extracts and joins streaming text tokens on the fly into complete responses.
+  - Displays real-time streaming output in the interactive cockpit dashboard.

@@ -41,6 +41,7 @@ pub enum AuditCategory {
     InsecureCookie,
     ServerInformationLeak,
     SecretLeak,
+    JwtVulnerability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,7 +169,7 @@ impl SecurityAuditor {
     pub fn audit_single_exchange(
         &self,
         endpoint: &str,
-        _req_headers: &HashMap<String, String>,
+        req_headers: &HashMap<String, String>,
         req_body: &[u8],
         status_code: u16,
         res_headers: &HashMap<String, String>,
@@ -406,7 +407,7 @@ impl SecurityAuditor {
 
         // 8. Secrets & Credential Detection in Request & Response
         let req_secrets = scan_secrets(req_body);
-        for s in req_secrets {
+        for s in &req_secrets {
             findings.push(AuditFinding {
                 severity: AuditSeverity::High,
                 category: AuditCategory::SecretLeak,
@@ -418,7 +419,7 @@ impl SecurityAuditor {
         }
 
         let res_secrets = scan_secrets(res_body);
-        for s in res_secrets {
+        for s in &res_secrets {
             findings.push(AuditFinding {
                 severity: AuditSeverity::Critical,
                 category: AuditCategory::SecretLeak,
@@ -431,6 +432,68 @@ impl SecurityAuditor {
                 remediation: "Immediately sanitize server responses and revoke leaked credentials."
                     .to_string(),
             });
+        }
+
+        // 9. Deep JWT Cryptographic Security Scanner & Weak Secret Cracker
+        let mut audited_tokens = std::collections::HashSet::new();
+        let mut check_jwt_candidate = |candidate: &str| {
+            if !candidate.is_empty()
+                && candidate.split('.').count() == 3
+                && audited_tokens.insert(candidate.to_string())
+            {
+                if let Some(report) = crate::engine::jwt_audit::JwtAuditor::audit_token(candidate) {
+                    for vuln in report.vulnerabilities {
+                        let sev = match vuln.severity {
+                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Critical => {
+                                AuditSeverity::Critical
+                            }
+                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::High => {
+                                AuditSeverity::High
+                            }
+                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Medium => {
+                                AuditSeverity::Medium
+                            }
+                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Low => {
+                                AuditSeverity::Low
+                            }
+                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Info => {
+                                AuditSeverity::Info
+                            }
+                        };
+                        findings.push(AuditFinding {
+                            severity: sev,
+                            category: AuditCategory::JwtVulnerability,
+                            title: vuln.title,
+                            endpoint: endpoint.to_string(),
+                            description: vuln.description,
+                            remediation: vuln.recommendation,
+                        });
+                    }
+                }
+            }
+        };
+
+        if let Some(auth) = req_headers.get("authorization") {
+            let trimmed = auth.trim();
+            if let Some(token) = trimmed.strip_prefix("Bearer ") {
+                check_jwt_candidate(token.trim());
+            } else if let Some(token) = trimmed.strip_prefix("bearer ") {
+                check_jwt_candidate(token.trim());
+            } else {
+                check_jwt_candidate(trimmed);
+            }
+        }
+
+        for (h_name, h_val) in req_headers.iter().chain(res_headers.iter()) {
+            if h_name.contains("token") || h_name.contains("jwt") || h_name.contains("auth") {
+                check_jwt_candidate(h_val.trim());
+            }
+        }
+
+        for s in req_secrets.iter().chain(res_secrets.iter()) {
+            if s.kind == crate::proto::secrets::SecretKind::JwtToken {
+                check_jwt_candidate(&s.raw_token);
+            }
         }
     }
 
@@ -625,5 +688,61 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.severity == AuditSeverity::Critical));
+    }
+
+    #[test]
+    fn test_audit_jwt_vulnerability_in_authorization_header() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let auditor = SecurityAuditor::new();
+        let h_b64 = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\",\"typ\":\"JWT\"}");
+        let p_b64 = URL_SAFE_NO_PAD.encode(b"{\"sub\":\"admin\"}");
+        let raw_jwt = format!("{}.{}.", h_b64, p_b64);
+
+        let entry = HarEntry {
+            started_date_time: "2026-11-04T12:00:00Z".to_string(),
+            time: 10.0,
+            request: HarRequest {
+                method: "GET".to_string(),
+                url: "https://api.example.com/protected".to_string(),
+                http_version: "HTTP/1.1".to_string(),
+                headers: vec![HarHeader {
+                    name: "Authorization".to_string(),
+                    value: format!("Bearer {}", raw_jwt),
+                }],
+                query_string: vec![],
+                post_data: None,
+                headers_size: 50,
+                body_size: 0,
+            },
+            response: HarResponse {
+                status: 200,
+                status_text: "OK".to_string(),
+                http_version: "HTTP/1.1".to_string(),
+                headers: vec![],
+                content: HarContent {
+                    size: 15,
+                    mime_type: "application/json".to_string(),
+                    text: Some(r#"{"status":"ok"}"#.to_string()),
+                },
+                redirect_url: "".to_string(),
+                headers_size: 50,
+                body_size: 15,
+            },
+            cache: json!({}),
+            timings: HarTimings {
+                send: 1.0,
+                wait: 5.0,
+                receive: 4.0,
+            },
+        };
+
+        let report = auditor.audit_har_entries(&[entry]);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.category == AuditCategory::JwtVulnerability
+                && f.severity == AuditSeverity::Critical));
     }
 }

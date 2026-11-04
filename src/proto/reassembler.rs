@@ -121,9 +121,25 @@ impl StreamReassembler {
         let header_end = text.find("\r\n\r\n")?;
         let headers_len = header_end + 4;
 
-        // Extract Content-Length if present
+        let first_line = text.lines().next().unwrap_or("");
+        let is_response = first_line.starts_with("HTTP/");
+
+        // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT include a message-body
+        if is_response {
+            let parts: Vec<&str> = first_line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(code) = parts[1].parse::<u16>() {
+                    if (100..200).contains(&code) || code == 204 || code == 304 {
+                        return Some(headers_len);
+                    }
+                }
+            }
+        }
+
+        // Extract Content-Length, Transfer-Encoding, and Connection headers
         let mut content_length = None;
         let mut is_chunked = false;
+        let mut is_close = false;
 
         for line in text[..header_end].lines() {
             if let Some((k, v)) = line.split_once(':') {
@@ -132,6 +148,8 @@ impl StreamReassembler {
                     content_length = v.trim().parse::<usize>().ok();
                 } else if key == "transfer-encoding" && v.to_lowercase().contains("chunked") {
                     is_chunked = true;
+                } else if key == "connection" && v.to_lowercase().contains("close") {
+                    is_close = true;
                 }
             }
         }
@@ -153,8 +171,25 @@ impl StreamReassembler {
             return None;
         }
 
-        // If no body expected (e.g. standard GET without body)
+        // RFC 7230 §3.3.3 Item 7: If a response is received without Content-Length
+        // and Connection: close is specified, the body is delimited by EOF (connection close).
+        // Delay completion until flush_connection() is invoked upon EOF.
+        if is_response && is_close {
+            return None;
+        }
+
+        // If no body expected (e.g. standard GET/HEAD request without body)
         Some(headers_len)
+    }
+
+    /// Flushes and returns any remaining buffered data for a closed connection (RFC 7230 §3.3.3 EOF termination).
+    pub fn flush_connection(&mut self, key: &ConnectionKey) -> Option<Vec<u8>> {
+        if let Some(entry) = self.buffers.remove(key) {
+            if !entry.data.is_empty() {
+                return Some(entry.data);
+            }
+        }
+        None
     }
 
     pub fn clear_connection(&mut self, key: &ConnectionKey) {
@@ -253,5 +288,54 @@ mod tests {
         // Max connections is 2, pushing k3 must evict oldest (k1)
         reassembler.push_chunk(k3, b"REQ3");
         assert_eq!(reassembler.active_connection_count(), 2);
+    }
+
+    #[test]
+    fn test_reassemble_rfc7230_eof_delimited_response() {
+        let mut reassembler = StreamReassembler::new(65536);
+        let key = ConnectionKey {
+            pid: 9999,
+            fd: 42,
+            direction: Direction::Ingress,
+        };
+
+        // HTTP response with Connection: close and NO Content-Length
+        let header_chunk =
+            b"HTTP/1.1 200 OK\r\nServer: Custom\r\nConnection: close\r\n\r\nBodyPart1";
+        let res1 = reassembler.push_chunk(key.clone(), header_chunk);
+        assert!(
+            res1.is_none(),
+            "Should wait for EOF instead of prematurely truncating at headers"
+        );
+
+        let body_chunk2 = b"-BodyPart2-EOF";
+        let res2 = reassembler.push_chunk(key.clone(), body_chunk2);
+        assert!(res2.is_none(), "Still waiting for EOF");
+
+        // Connection closes (EOF)
+        let flushed = reassembler
+            .flush_connection(&key)
+            .expect("Must return accumulated EOF response");
+        let flushed_str = String::from_utf8_lossy(&flushed);
+        assert!(flushed_str.contains("HTTP/1.1 200 OK"));
+        assert!(flushed_str.contains("BodyPart1-BodyPart2-EOF"));
+        assert_eq!(reassembler.active_connection_count(), 0);
+    }
+
+    #[test]
+    fn test_reassemble_rfc7230_204_no_content() {
+        let mut reassembler = StreamReassembler::new(65536);
+        let key = ConnectionKey {
+            pid: 8888,
+            fd: 10,
+            direction: Direction::Ingress,
+        };
+
+        let chunk = b"HTTP/1.1 204 No Content\r\nServer: test\r\n\r\n";
+        let res = reassembler.push_chunk(key, chunk);
+        assert!(
+            res.is_some(),
+            "204 No Content must immediately complete without expecting body"
+        );
     }
 }

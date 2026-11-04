@@ -18,6 +18,7 @@ nullca <COMMAND> [OPTIONS]
 | `stream` | | Stream live decrypted events from a background NullCA daemon socket |
 | `inspect-cert` | | Dissect X.509 certificates (PEM, DER, bundles, directories, CSR, CRL, remote endpoints) |
 | `export-openapi` | | Synthesize an OpenAPI 3.0 specification from captured HTTP HAR logs |
+| `export-postman` | | Export captured HTTP HAR logs or traffic to Postman Collection v2.1.0 JSON |
 | `audit` | | Run passive security posture, header hygiene, and secret leak audit |
 | `export-sslkeylog` | | Export TLS session secrets in standard NSS SSLKEYLOGFILE format for Wireshark |
 | `web` | | Launch embedded Web Cockpit dashboard and REST API daemon |
@@ -85,7 +86,14 @@ Generates a complete OpenAPI 3.0.3 specification from captured HTTP traffic.
 nullca export-openapi --har traffic.har --output openapi.json --title "Billing Service API" --version "2.1.0"
 ```
 
-### 6. `nullca audit`
+### 6. `nullca export-postman`
+Exports captured HTTP HAR logs or traffic to Postman Collection v2.1.0 JSON format for Postman, Insomnia, and Newman testing suites.
+```bash
+# Convert HAR capture to Postman Collection
+nullca export-postman --har traffic.har --output postman_collection.json --name "Payment Service API"
+```
+
+### 7. `nullca audit`
 Performs automated security posture and hygiene checks on captured HTTP traffic.
 ```bash
 # Print formatted human-readable report
@@ -95,20 +103,20 @@ nullca audit --har traffic.har
 nullca audit --har traffic.har --json > audit_results.json
 ```
 
-### 7. `nullca export-sslkeylog`
+### 8. `nullca export-sslkeylog`
 Initializes standard NSS SSLKEYLOGFILE writer for Wireshark live decryption.
 ```bash
 nullca export-sslkeylog --output /tmp/nullca.keys
 ```
 
-### 8. `nullca web`
+### 9. `nullca web`
 Launches the embedded zero-dependency Web Cockpit dashboard and REST API daemon.
 ```bash
 nullca web --port 8080
 # Open http://localhost:8080 in any browser or mobile device
 ```
 
-### 9. `nullca fuzz`
+### 10. `nullca fuzz`
 High-throughput parameter mutation and fuzzing engine for identifying server crashes (HTTP 500), input validation errors, and timing anomalies.
 ```bash
 # Fuzz an endpoint parameter using default boundary dictionary
@@ -118,7 +126,7 @@ nullca fuzz --target 127.0.0.1:8080 --method GET --path "/api/v1/user?id=1" --pa
 nullca fuzz --target api.local:443 --path "/search?q=test" --param q --wordlist /tmp/payloads.txt --json
 ```
 
-### 10. `nullca replay`
+### 11. `nullca replay`
 Replays an HTTP request with custom headers or body, measuring sub-millisecond network timings (TTFB, connect latency).
 ```bash
 nullca replay --target 127.0.0.1:8080 --method POST --path /api/v1/login \
@@ -126,7 +134,7 @@ nullca replay --target 127.0.0.1:8080 --method POST --path /api/v1/login \
   --body '{"username":"admin"}'
 ```
 
-### 9. `nullca diff`
+### 12. `nullca diff`
 Compares two HTTP messages or payloads with color-coded side-by-side diff.
 ```bash
 nullca diff req1.txt req2.txt

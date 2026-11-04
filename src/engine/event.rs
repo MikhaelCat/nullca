@@ -19,8 +19,11 @@ impl std::fmt::Display for Direction {
 pub enum ProtocolType {
     Http1,
     Http2,
+    Http3,
     Grpc,
     WebSocket,
+    Sse,
+    Dns,
     X509,
     Redis,
     Database,
@@ -33,8 +36,11 @@ impl std::fmt::Display for ProtocolType {
         match self {
             ProtocolType::Http1 => write!(f, "HTTP/1.1"),
             ProtocolType::Http2 => write!(f, "HTTP/2"),
+            ProtocolType::Http3 => write!(f, "HTTP/3"),
             ProtocolType::Grpc => write!(f, "gRPC"),
             ProtocolType::WebSocket => write!(f, "WebSocket"),
+            ProtocolType::Sse => write!(f, "SSE-Stream"),
+            ProtocolType::Dns => write!(f, "DNS/DoH"),
             ProtocolType::X509 => write!(f, "X.509-Cert"),
             ProtocolType::Redis => write!(f, "Redis-TLS"),
             ProtocolType::Database => write!(f, "Database-TLS"),
@@ -184,6 +190,25 @@ impl TlsEvent {
         // Check RFC 6455 WebSocket framing
         if crate::proto::websocket::WebSocketParser::is_probable_websocket(slice) {
             return ProtocolType::WebSocket;
+        }
+
+        // Check Server-Sent Events (SSE / text/event-stream)
+        if crate::proto::sse::SseParser::is_probable_sse(slice) {
+            return ProtocolType::Sse;
+        }
+
+        // Check RFC 1035 / RFC 8484 DNS & DoH framing
+        if crate::proto::dns::DnsParser::is_probable_dns(slice) {
+            return ProtocolType::Dns;
+        }
+
+        // Check HTTP/3 / QUIC Framing
+        let h3_frames = crate::proto::http3::Http3Parser::parse_frames(slice);
+        if !h3_frames.is_empty()
+            && (h3_frames[0].frame_type == crate::proto::http3::Http3FrameType::Headers
+                || h3_frames[0].frame_type == crate::proto::http3::Http3FrameType::Data)
+        {
+            return ProtocolType::Http3;
         }
 
         // Check HTTP/2 frame pattern (Length 3 bytes, Type 1 byte, Flags 1 byte, StreamID 4 bytes)

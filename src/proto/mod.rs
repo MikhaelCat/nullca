@@ -1,13 +1,16 @@
 pub mod compression;
 pub mod database;
+pub mod dns;
 pub mod grpc;
 pub mod http1;
 pub mod http2;
+pub mod http3;
 pub mod huffman;
 pub mod multiplexer;
 pub mod protobuf;
 pub mod qpack;
 pub mod reassembler;
 pub mod secrets;
+pub mod sse;
 pub mod websocket;
 pub mod x509;

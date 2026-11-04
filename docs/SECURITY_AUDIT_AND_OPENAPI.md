@@ -73,3 +73,41 @@ nullca export-openapi --har traffic.har --output swagger.json --title "Order Ser
 ```
 
 The resulting `swagger.json` can be loaded directly into Swagger UI, Redoc, Postman, or Burp Suite.
+
+---
+
+## 3. Deep JWT Cryptographic Security Scanner (`src/engine/jwt_audit.rs`)
+
+NullCA incorporates an in-depth cryptographic JWT auditor and offline secret cracking engine:
+
+### Vulnerability Checks:
+1. **Algorithm 'none' Signature Bypass (CVE-2015-9235)**:
+   - Detects tokens specifying `alg: "none"`, allowing attackers to forge arbitrary claims without holding signing keys.
+2. **Offline HMAC-SHA256 Dictionary Cracker**:
+   - Zero-dependency RFC 2104 HMAC-SHA256 implementation utilizing NullCA's cryptographic SHA-256 engine.
+   - Automatically cracks weak shared secrets against common dictionary lists (e.g. `secret`, `password`, `admin`, `123456`, `jwt`).
+3. **Token Expiration (`exp`) Absence & Temporal Validity**:
+   - Flags tokens lacking the mandatory `exp` claim (valid indefinitely).
+   - Flags expired tokens accepted or emitted by backend APIs.
+
+### TUI Cockpit & Auditor Integration:
+- Scanned tokens from `Authorization: Bearer <jwt>`, cookie headers, and JSON request/response bodies are audited automatically.
+- Tab 3 (`Secrets & Flags`) in the interactive cockpit highlights cracked keys and signature bypasses in bright warning banners.
+
+---
+
+## 4. Postman Collection v2.1.0 Exporter (`src/export/postman.rs`)
+
+Converts captured network sessions into native Postman Collections:
+- Generates valid Postman schema (`https://schema.getpostman.com/json/collection/v2.1.0/collection.json`).
+- Decomposes URLs into structured `protocol`, `host` slices, `path` slices, and `query` key-value pairs.
+- Preserves raw request bodies with automatic JSON language detection.
+- Generates collections from HAR files via CLI (`nullca export-postman --har capture.har --output collection.json`) or directly from decoded traffic.
+
+---
+
+## 5. PCAP-NG Decryption Secrets Block (DSB) (`src/export/pcapng.rs`)
+
+- Implements PCAP-NG Block Type `0x0000000A` (Decryption Secrets Block) with Secrets Type `0x544c534b` (`TLSK`).
+- Embeds TLS master secrets and keylog lines directly into exported `.pcapng` files.
+- **Wireshark Zero-Configuration Decryption**: Allows analysts to open `.pcapng` files in Wireshark without manually setting `(Pre)-Master-Secret log filename` in preferences.

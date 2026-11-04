@@ -7,6 +7,7 @@ pub mod fuzz;
 pub mod golang;
 pub mod idor;
 pub mod ipc;
+pub mod jwt_audit;
 pub mod replay;
 pub mod spawn;
 pub mod symbols;

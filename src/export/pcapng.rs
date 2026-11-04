@@ -46,8 +46,62 @@ impl PcapNgWriter {
         Ok(Self { file })
     }
 
-    pub fn write_to_file<P: AsRef<Path>>(events: &[TlsEvent], path: P) -> io::Result<()> {
+    /// Creates a PCAP-NG file initialized with Section Header, Interface Description,
+    /// and an optional Decryption Secrets Block (DSB) containing SSLKEYLOG entries for Wireshark.
+    pub fn create_with_secrets<P: AsRef<Path>>(path: P, secrets: Option<&str>) -> io::Result<Self> {
         let mut writer = Self::create(path)?;
+        if let Some(s) = secrets {
+            if !s.trim().is_empty() {
+                writer.write_decryption_secrets_block(s)?;
+            }
+        }
+        Ok(writer)
+    }
+
+    /// Writes a Decryption Secrets Block (DSB) to embed TLS Key Log entries directly into PCAP-NG.
+    ///
+    /// Block Type: 0x0000000A (Decryption Secrets Block)
+    /// Secrets Type: 0x544c534b ('TLSK' - TLS Key Log)
+    pub fn write_decryption_secrets_block(&mut self, secrets: &str) -> io::Result<()> {
+        let trimmed = secrets.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        // Secrets data formatted as newline-terminated UTF-8 text
+        let secrets_bytes = if trimmed.ends_with('\n') {
+            trimmed.as_bytes().to_vec()
+        } else {
+            format!("{}\n", trimmed).into_bytes()
+        };
+
+        let sec_len = secrets_bytes.len() as u32;
+        let pad_len = (4 - (sec_len % 4)) % 4;
+        let total_block_len = 20 + sec_len + pad_len;
+
+        let mut dsb = Vec::with_capacity(total_block_len as usize);
+        dsb.extend_from_slice(&0x0000000Au32.to_le_bytes()); // Block Type: 0x0000000A (DSB)
+        dsb.extend_from_slice(&total_block_len.to_le_bytes()); // Block Total Length
+        dsb.extend_from_slice(&0x544c534bu32.to_be_bytes()); // Secrets Type: 'TLSK' (0x544C534B)
+        dsb.extend_from_slice(&sec_len.to_le_bytes()); // Secrets Length
+        dsb.extend_from_slice(&secrets_bytes); // Secrets Data
+        dsb.resize(dsb.len() + pad_len as usize, 0); // 32-bit alignment padding
+        dsb.extend_from_slice(&total_block_len.to_le_bytes()); // Repeated Block Total Length
+
+        self.file.write_all(&dsb)?;
+        self.file.flush()
+    }
+
+    pub fn write_to_file<P: AsRef<Path>>(events: &[TlsEvent], path: P) -> io::Result<()> {
+        Self::write_to_file_with_secrets(events, None, path)
+    }
+
+    pub fn write_to_file_with_secrets<P: AsRef<Path>>(
+        events: &[TlsEvent],
+        secrets: Option<&str>,
+        path: P,
+    ) -> io::Result<()> {
+        let mut writer = Self::create_with_secrets(path, secrets)?;
         for event in events {
             writer.write_event(event)?;
         }
@@ -213,5 +267,46 @@ mod tests {
         // Verify real IP octets exist in packet
         assert!(bytes.windows(4).any(|w| w == [192, 168, 1, 50]));
         assert!(bytes.windows(4).any(|w| w == [10, 0, 0, 1]));
+    }
+
+    #[test]
+    fn test_pcapng_decryption_secrets_block() {
+        let tmp = NamedTempFile::new().expect("Failed to create temp file");
+        let path = tmp.path();
+
+        let sample_keylog = "CLIENT_RANDOM 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n";
+
+        {
+            let mut writer = PcapNgWriter::create_with_secrets(path, Some(sample_keylog))
+                .expect("Failed to create PCAP-NG with DSB");
+            let event = TlsEvent::new(
+                1700000000000000000,
+                100,
+                100,
+                3,
+                Direction::Ingress,
+                "curl".into(),
+                b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
+                None,
+            );
+            writer.write_event(&event).expect("Failed to write event");
+        }
+
+        let bytes = std::fs::read(path).expect("Failed to read back pcapng");
+
+        // Verify DSB block exists (Block Type 0x0000000A = [0x0A, 0x00, 0x00, 0x00])
+        assert!(
+            bytes.windows(4).any(|w| w == [0x0A, 0x00, 0x00, 0x00]),
+            "DSB block type not found"
+        );
+
+        // Verify Secrets Type 'TLSK' (0x54, 0x4C, 0x53, 0x4B)
+        assert!(
+            bytes.windows(4).any(|w| w == b"TLSK"),
+            "TLSK magic not found in DSB block"
+        );
+
+        // Verify sample keylog data is embedded
+        assert!(bytes.windows(13).any(|w| w == b"CLIENT_RANDOM"));
     }
 }

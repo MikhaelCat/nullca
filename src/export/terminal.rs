@@ -204,6 +204,54 @@ impl TerminalFormatter {
                     output.push_str(&format!("  [SMTP Protocol] {}\n", line.yellow()));
                 }
             }
+            ProtocolType::Dns => {
+                if let Some(dns) = crate::proto::dns::DnsParser::parse(&event.data) {
+                    output.push_str(&format!(
+                        "  [DNS / DoH] ID: 0x{:04x} | {}\n",
+                        dns.id,
+                        dns.rcode_str().green()
+                    ));
+                    for q in &dns.questions {
+                        output.push_str(&format!(
+                            "    Question: {} ({})\n",
+                            q.qname.cyan(),
+                            q.qtype
+                        ));
+                    }
+                    for a in &dns.answers {
+                        output.push_str(&format!(
+                            "    Answer: {} {} ➔ {}\n",
+                            a.name,
+                            a.rtype,
+                            a.rdata.green().bold()
+                        ));
+                    }
+                }
+            }
+            ProtocolType::Sse => {
+                let sse_events = crate::proto::sse::SseParser::parse_stream(&event.data);
+                output.push_str(&format!(
+                    "  [Server-Sent Events] {} chunks\n",
+                    sse_events.len()
+                ));
+                for s in &sse_events {
+                    output.push_str(&format!(
+                        "    event: {} | data: {}\n",
+                        s.event_type.as_deref().unwrap_or("-").yellow(),
+                        s.data.dimmed()
+                    ));
+                }
+            }
+            ProtocolType::Http3 => {
+                let frames = crate::proto::http3::Http3Parser::parse_frames(&event.data);
+                output.push_str(&format!("  [HTTP/3 (QUIC)] {} frames\n", frames.len()));
+                for f in &frames {
+                    output.push_str(&format!(
+                        "    Frame: {:?} ({} bytes)\n",
+                        f.frame_type, f.length
+                    ));
+                }
+            }
             ProtocolType::RawTls => {
                 if self.show_hexdump {
                     output.push_str(&Self::hexdump(&event.data));

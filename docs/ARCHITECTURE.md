@@ -54,13 +54,22 @@ Client Process ══════════════[ 100% UNTOUCHED REAL T
 - Maintains stateful per-socket buffers that accumulate bytes until a full application message or frame boundary is recognized.
 
 ### D. Multi-Protocol Dissection Engine (`src/proto/`)
-- **HTTP/1.1 Parser**: Content-Length, Chunked Transfer Encoding, pipelining.
-- **HTTP/2 & HPACK Engine**: Full frame parsing (HEADERS, DATA, SETTINGS, CONTINUATION), dynamic table management, canonical Huffman decoder.
+- **HTTP/1.1 Parser**: Content-Length, Chunked Transfer Encoding, pipelining, and RFC 7230 §3.3.3 EOF-delimited connection close reassembly.
+- **HTTP/2 & HPACK Engine**: Full frame parsing (HEADERS, DATA, SETTINGS, CONTINUATION), CONTINUATION flood mitigation, dynamic table management, canonical Huffman decoder.
+- **HTTP/3 & QUIC Engine**: RFC 9114 HTTP/3 frames (DATA, HEADERS, SETTINGS, GOAWAY), RFC 9000 QUIC varint codec, and RFC 9204 QPACK static/dynamic table decompressor.
+- **DNS & DoH Dissector**: RFC 1035 and RFC 8484 wire parser with QNAME jump-table decompression and support for A, AAAA, CNAME, TXT, MX, NS records.
+- **Server-Sent Events (SSE) Engine**: RFC 8895 stream parser with automated LLM streaming token extractor (OpenAI, Anthropic Claude, Ollama).
 - **gRPC & Protobuf Dissector**: Decodes wire types (Varint, 64-bit, Length-delimited, 32-bit) without requiring pre-compiled `.proto` files.
-- **WebSocket Dissector**: RFC 6455 frame de-masking, fragmentation assembly, text/binary/JSON extraction.
+- **WebSocket Dissector**: RFC 6455 frame de-masking, fragmentation assembly, and RFC 7692 `permessage-deflate` decompression.
 - **X.509 ASN.1 Dissector**: Zero-dependency DER/PEM parser supporting RSA, ECC, Edwards, GOST, SM2, and Post-Quantum cryptography.
+- **Stream Decompression**: Native Brotli, Gzip, and Deflate/Zlib multi-algorithm decompressor.
 
 ### E. Analytics, Auditing & Export Pipeline
-- **Security Auditor (`src/engine/audit.rs`)**: Real-time hygiene checks for HSTS, CORS, CSP, Cookies, and Leaked Secrets.
+- **Security Auditor (`src/engine/audit.rs`)**: Real-time hygiene checks for HSTS, CORS, CSP, Cookies, Server banners, and Leaked Secrets.
+- **Deep JWT Cryptographic Scanner (`src/engine/jwt_audit.rs`)**: Zero-dependency RFC 2104 HMAC-SHA256 dictionary cracker, CVE-2015-9235 `alg: none` bypass detection, and expiration validation.
+- **IDOR / BOLA Detector (`src/engine/idor.rs`)**: Cross-identity multi-tenant object access violation tracker.
+- **Active Parameter Fuzzer (`src/engine/fuzz.rs`)**: Mutation-based payload generator testing for server-side crashes, SQLi/traversal echoes, and timing anomalies.
 - **OpenAPI Synthesizer (`src/export/openapi.rs`)**: Automatic schema generation from captured HTTP streams.
-- **Exporters**: Wireshark PCAP-NG with Decryption Secrets Blocks, Chrome HAR 1.2, cURL command generator, and NSS SSLKEYLOGFILE.
+- **Postman Collection Exporter (`src/export/postman.rs`)**: Postman v2.1.0 JSON format exporter with URL decomposition and raw payload modeling.
+- **Exporters**: Wireshark PCAP-NG with Decryption Secrets Blocks (DSB, type 0x0000000A) and real 4-tuple TCP resolution, Chrome HAR 1.2, cURL command generator, and NSS SSLKEYLOGFILE.
+- **Cockpit TUI (`src/ui/dashboard.rs`)**: Real-time throughput sparkline (`ratatui::widgets::Sparkline`), Vim command mode, live search, request repeater, and multi-protocol inspector.

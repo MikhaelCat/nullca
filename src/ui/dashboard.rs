@@ -36,7 +36,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{
         Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Table, TableState, Wrap,
+        Sparkline, Table, TableState, Wrap,
     },
     Terminal,
 };
@@ -110,6 +110,11 @@ pub struct DashboardState {
     pub idor_detector: crate::engine::idor::IdorDetector,
     pub pending_http1_requests: HashMap<(u32, i32), (String, Option<String>)>,
     pub idor_event_indices: HashSet<usize>,
+
+    // Real-time Throughput Sparkline & Rate Metrics
+    pub throughput_history: Vec<u64>,
+    pub last_sparkline_sample: Instant,
+    pub bytes_in_current_interval: u64,
 }
 
 impl Default for DashboardState {
@@ -156,6 +161,9 @@ impl DashboardState {
             idor_detector: crate::engine::idor::IdorDetector::new(),
             pending_http1_requests: HashMap::new(),
             idor_event_indices: HashSet::new(),
+            throughput_history: Vec::with_capacity(64),
+            last_sparkline_sample: Instant::now(),
+            bytes_in_current_interval: 0,
         }
     }
 
@@ -168,9 +176,24 @@ impl DashboardState {
         self.status_message = Some((msg, Instant::now()));
     }
 
+    pub fn update_throughput_sparkline(&mut self) {
+        let elapsed = self.last_sparkline_sample.elapsed();
+        if elapsed >= Duration::from_millis(500) {
+            let rate_kb = (self.bytes_in_current_interval as f64 / 1024.0) / elapsed.as_secs_f64();
+            self.throughput_history.push(rate_kb.round() as u64);
+            if self.throughput_history.len() > 50 {
+                self.throughput_history.remove(0);
+            }
+            self.bytes_in_current_interval = 0;
+            self.last_sparkline_sample = Instant::now();
+        }
+    }
+
     pub fn push_event(&mut self, mut event: TlsEvent) {
         event.resolve_endpoints();
         self.total_bytes += event.data.len();
+        self.bytes_in_current_interval += event.data.len() as u64;
+        self.update_throughput_sparkline();
         let idx = self.events.len();
 
         // IDOR / BOLA transaction inspection
@@ -435,6 +458,7 @@ async fn dashboard_loop(
         }
 
         // Render frame
+        state.update_throughput_sparkline();
         terminal.draw(|f| draw_ui(f, state))?;
 
         // Handle user input events
@@ -1252,6 +1276,14 @@ fn draw_ui(f: &mut ratatui::Frame, state: &mut DashboardState) {
 }
 
 fn draw_header(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
+    let header_chunks = Layout::default()
+        .direction(LayoutDirection::Horizontal)
+        .constraints([
+            Constraint::Min(45),    // Title & Stats
+            Constraint::Length(26), // Real-time Throughput Sparkline
+        ])
+        .split(area);
+
     let elapsed = state.start_time.elapsed().as_secs();
     let speed_kb = if elapsed > 0 {
         (state.total_bytes / 1024) / elapsed as usize
@@ -1371,7 +1403,19 @@ fn draw_header(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
         .border_style(Style::default().fg(Color::Cyan));
 
     let paragraph = Paragraph::new(stats_line).block(block);
-    f.render_widget(paragraph, area);
+    f.render_widget(paragraph, header_chunks[0]);
+
+    // Real-time Throughput Sparkline (KB/s)
+    let sparkline_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Rate (KB/s) ")
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let sparkline = Sparkline::default()
+        .block(sparkline_block)
+        .data(&state.throughput_history)
+        .style(Style::default().fg(Color::LightGreen));
+    f.render_widget(sparkline, header_chunks[1]);
 }
 
 fn draw_filter_bar(f: &mut ratatui::Frame, state: &DashboardState, area: Rect) {
@@ -1468,8 +1512,11 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
             let (proto_str, proto_style) = match ev.protocol() {
                 ProtocolType::Http1 => ("HTTP/1.1", Style::default().fg(Color::LightCyan)),
                 ProtocolType::Http2 => ("HTTP/2", Style::default().fg(Color::Magenta)),
+                ProtocolType::Http3 => ("HTTP/3", Style::default().fg(Color::LightMagenta)),
                 ProtocolType::Grpc => ("gRPC", Style::default().fg(Color::LightGreen)),
                 ProtocolType::WebSocket => ("WS", Style::default().fg(Color::Cyan)),
+                ProtocolType::Sse => ("SSE", Style::default().fg(Color::Yellow)),
+                ProtocolType::Dns => ("DNS", Style::default().fg(Color::LightBlue)),
                 ProtocolType::X509 => ("X.509", Style::default().fg(Color::Yellow)),
                 ProtocolType::Redis => ("REDIS", Style::default().fg(Color::LightRed)),
                 ProtocolType::Database => ("SQL", Style::default().fg(Color::LightBlue)),
@@ -1520,6 +1567,57 @@ fn draw_packet_table(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                             .unwrap_or("")
                             .to_string()
                     }
+                }
+                ProtocolType::Dns => {
+                    if let Some(dns) = crate::proto::dns::DnsParser::parse(&ev.data) {
+                        if dns.is_response {
+                            let ans_preview = dns
+                                .answers
+                                .first()
+                                .map(|a| a.rdata.as_str())
+                                .unwrap_or("No answer");
+                            format!(
+                                "DNS-RESP {} ({} answers) -> {}",
+                                dns.rcode_str(),
+                                dns.answers.len(),
+                                ans_preview
+                            )
+                        } else {
+                            let q_name = dns
+                                .questions
+                                .first()
+                                .map(|q| q.qname.as_str())
+                                .unwrap_or("<?>");
+                            let q_type = dns
+                                .questions
+                                .first()
+                                .map(|q| q.qtype.to_string())
+                                .unwrap_or_default();
+                            format!("DNS-QUERY {} {}", q_type, q_name)
+                        }
+                    } else {
+                        "DNS wire payload".into()
+                    }
+                }
+                ProtocolType::Sse => {
+                    let sse_events = crate::proto::sse::SseParser::parse_stream(&ev.data);
+                    if !sse_events.is_empty() {
+                        let sample = &sse_events[0].data;
+                        let trimmed = sample
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(45)
+                            .collect::<String>();
+                        format!("SSE [{} msg] {}", sse_events.len(), trimmed)
+                    } else {
+                        "SSE stream chunk".into()
+                    }
+                }
+                ProtocolType::Http3 => {
+                    let h3_frames = crate::proto::http3::Http3Parser::parse_frames(&ev.data);
+                    format!("HTTP/3 [{} frames]", h3_frames.len())
                 }
                 ProtocolType::X509 => {
                     if let Some(cert) = X509Parser::parse(&ev.data) {
@@ -1885,6 +1983,135 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                             )));
                         }
                     }
+                    ProtocolType::Dns => {
+                        if let Some(dns) = crate::proto::dns::DnsParser::parse(&ev.data) {
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "--- DNS / DoH Message (ID: 0x{:04x}, RCODE: {}) ---",
+                                    dns.id,
+                                    dns.rcode_str()
+                                ),
+                                Style::default()
+                                    .fg(Color::LightCyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                            lines.push(Line::from(vec![
+                                Span::styled("Type: ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    if dns.is_response { "Response" } else { "Query" },
+                                    Style::default().fg(Color::Yellow),
+                                ),
+                                Span::styled(" | Flags: ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    format!(
+                                        "AA={} TC={} RD={} RA={}",
+                                        dns.authoritative,
+                                        dns.truncated,
+                                        dns.recursion_desired,
+                                        dns.recursion_available
+                                    ),
+                                    Style::default().fg(Color::White),
+                                ),
+                            ]));
+                            lines.push(Line::raw(""));
+                            lines.push(Line::from(Span::styled(
+                                format!("Questions ({}):", dns.questions.len()),
+                                Style::default().fg(Color::LightGreen),
+                            )));
+                            for q in &dns.questions {
+                                lines.push(Line::from(format!("  • {} ({})", q.qname, q.qtype)));
+                            }
+                            if !dns.answers.is_empty() {
+                                lines.push(Line::raw(""));
+                                lines.push(Line::from(Span::styled(
+                                    format!("Answers ({}):", dns.answers.len()),
+                                    Style::default()
+                                        .fg(Color::Green)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
+                                for a in &dns.answers {
+                                    lines.push(Line::from(format!(
+                                        "  • {} {} (TTL: {}s) ➔ {}",
+                                        a.name, a.rtype, a.ttl, a.rdata
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    ProtocolType::Sse => {
+                        let sse_events = crate::proto::sse::SseParser::parse_stream(&ev.data);
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "--- Server-Sent Events ({} event chunks) ---",
+                                sse_events.len()
+                            ),
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                        let ai_text =
+                            crate::proto::sse::SseParser::extract_ai_stream_text(&sse_events);
+                        if !ai_text.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "--- Extracted AI Stream Text ---",
+                                Style::default().fg(Color::Green),
+                            )));
+                            for l in ai_text.lines() {
+                                lines.push(Line::from(Span::styled(
+                                    l.to_string(),
+                                    Style::default().fg(Color::White),
+                                )));
+                            }
+                            lines.push(Line::raw(""));
+                        }
+                        for (i, s) in sse_events.iter().enumerate() {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    format!("[{}] ", i + 1),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                                Span::styled(
+                                    format!(
+                                        "Event: {} | ID: {} | ",
+                                        s.event_type.as_deref().unwrap_or("message"),
+                                        s.id.as_deref().unwrap_or("-")
+                                    ),
+                                    Style::default().fg(Color::Cyan),
+                                ),
+                                Span::from(s.data.clone()),
+                            ]));
+                        }
+                    }
+                    ProtocolType::Http3 => {
+                        let h3_frames = crate::proto::http3::Http3Parser::parse_frames(&ev.data);
+                        lines.push(Line::from(Span::styled(
+                            format!("--- HTTP/3 (QUIC) Frames ({} frames) ---", h3_frames.len()),
+                            Style::default()
+                                .fg(Color::LightMagenta)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                        for (i, f) in h3_frames.iter().enumerate() {
+                            lines.push(Line::from(format!(
+                                "  [{}] Frame Type: {:?}, Length: {} bytes",
+                                i + 1,
+                                f.frame_type,
+                                f.length
+                            )));
+                            if f.frame_type == crate::proto::http3::Http3FrameType::Headers {
+                                let hdrs =
+                                    crate::proto::http3::Http3Parser::decode_headers(&f.payload);
+                                for (k, v) in hdrs {
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            format!("      {}: ", k),
+                                            Style::default().fg(Color::LightCyan),
+                                        ),
+                                        Span::from(v),
+                                    ]));
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         lines.push(Line::from(Span::styled(
                             "--- Decoded Payload Stream ---",
@@ -2009,7 +2236,7 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                         lines.push(Line::from(vec![
                             Span::styled("Token: ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
-                                sec.raw_token,
+                                sec.raw_token.clone(),
                                 Style::default()
                                     .fg(Color::LightGreen)
                                     .add_modifier(Modifier::BOLD),
@@ -2023,6 +2250,59 @@ fn draw_details_pane(f: &mut ratatui::Frame, state: &mut DashboardState, area: R
                                 )));
                             }
                         }
+
+                        // Deep JWT Cryptographic Security Scanner & Weak Secret Cracker
+                        if sec.kind == crate::proto::secrets::SecretKind::JwtToken {
+                            if let Some(jwt_report) =
+                                crate::engine::jwt_audit::JwtAuditor::audit_token(&sec.raw_token)
+                            {
+                                if !jwt_report.vulnerabilities.is_empty() {
+                                    lines.push(Line::from(Span::styled(
+                                        "  ⚠️  JWT Cryptographic Audit Findings:",
+                                        Style::default()
+                                            .fg(Color::LightRed)
+                                            .add_modifier(Modifier::BOLD),
+                                    )));
+                                    for v in jwt_report.vulnerabilities {
+                                        let color = match v.severity {
+                                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Critical => {
+                                                Color::Red
+                                            }
+                                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::High => {
+                                                Color::LightRed
+                                            }
+                                            crate::engine::jwt_audit::JwtVulnerabilitySeverity::Medium => {
+                                                Color::Yellow
+                                            }
+                                            _ => Color::Cyan,
+                                        };
+                                        lines.push(Line::from(vec![
+                                            Span::styled(
+                                                format!("    [{:?}] ", v.severity),
+                                                Style::default()
+                                                    .fg(color)
+                                                    .add_modifier(Modifier::BOLD),
+                                            ),
+                                            Span::styled(
+                                                v.title,
+                                                Style::default()
+                                                    .fg(Color::White)
+                                                    .add_modifier(Modifier::BOLD),
+                                            ),
+                                        ]));
+                                        lines.push(Line::from(Span::styled(
+                                            format!("      Exploitation / Risk: {}", v.description),
+                                            Style::default().fg(Color::DarkGray),
+                                        )));
+                                        lines.push(Line::from(Span::styled(
+                                            format!("      Remediation: {}", v.recommendation),
+                                            Style::default().fg(Color::Green),
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+
                         lines.push(Line::raw(""));
                     }
                 }

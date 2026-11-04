@@ -287,6 +287,21 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+
+    /// Export captured HTTP HAR logs or traffic to Postman Collection v2.1.0 JSON
+    ExportPostman {
+        /// Input HAR file path (.har)
+        #[arg(short, long)]
+        har: PathBuf,
+
+        /// Output path for Postman Collection JSON
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Collection title name
+        #[arg(short, long, default_value = "nullca Captured API Collection")]
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -1068,6 +1083,32 @@ async fn main() -> anyhow::Result<()> {
                     "{} OpenAPI 3.0 specification successfully saved to: {}",
                     "[+]".bold().green(),
                     out_path.display().to_string().cyan().bold()
+                );
+            } else {
+                println!("{}", json_str);
+            }
+        }
+
+        Commands::ExportPostman { har, output, name } => {
+            println!(
+                "{} Loading HAR capture: {}",
+                "[*]".bold().blue(),
+                har.display().to_string().cyan()
+            );
+            let har_content = std::fs::read_to_string(&har)?;
+            let col =
+                nullca::export::postman::PostmanExporter::from_har_str(&har_content, Some(&name))
+                    .map_err(|e| anyhow::anyhow!("Failed to parse HAR: {}", e))?;
+
+            let json_str = serde_json::to_string_pretty(&col)?;
+
+            if let Some(out_path) = output {
+                std::fs::write(&out_path, &json_str)?;
+                println!(
+                    "{} Postman v2.1.0 collection successfully saved to: {} ({} requests)",
+                    "[+]".bold().green(),
+                    out_path.display().to_string().cyan().bold(),
+                    col.item.len()
                 );
             } else {
                 println!("{}", json_str);
