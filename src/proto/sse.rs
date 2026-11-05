@@ -28,58 +28,77 @@ impl SseParser {
             || text.contains("\r\ndata:")
     }
 
-    /// Parses all complete SSE events from a byte stream.
+    /// Parses all complete SSE events from a byte stream per W3C EventSource spec.
+    /// Correctly handles both CRLF (\r\n\r\n) and LF (\n\n) event delimiters.
     pub fn parse_stream(data: &[u8]) -> Vec<SseEvent> {
         let text = String::from_utf8_lossy(data);
         let mut events = Vec::new();
 
-        // Normalized message splitting by double newline (\n\n or \r\n\r\n)
-        let blocks = text.split("\n\n");
+        let mut current_event_type = None;
+        let mut current_id = None;
+        let mut current_retry = None;
+        let mut data_lines = Vec::new();
 
-        for block in blocks {
-            let trimmed_block = block.trim();
-            if trimmed_block.is_empty() {
-                continue;
-            }
-
-            let mut current_event_type = None;
-            let mut current_id = None;
-            let mut current_retry = None;
-            let mut data_lines = Vec::new();
-
-            for line in block.lines() {
-                let trimmed_line = line.trim_end_matches('\r');
-                if trimmed_line.is_empty() || trimmed_line.starts_with(':') {
-                    // Comment or blank line
-                    continue;
-                }
-
-                if let Some(rest) = trimmed_line.strip_prefix("data:") {
-                    let d = rest.strip_prefix(' ').unwrap_or(rest);
-                    data_lines.push(d);
-                } else if let Some(rest) = trimmed_line.strip_prefix("event:") {
-                    current_event_type = Some(rest.trim().to_string());
-                } else if let Some(rest) = trimmed_line.strip_prefix("id:") {
-                    current_id = Some(rest.trim().to_string());
-                } else if let Some(rest) = trimmed_line.strip_prefix("retry:") {
-                    current_retry = rest.trim().parse::<u64>().ok();
-                }
-            }
-
-            if !data_lines.is_empty() || current_event_type.is_some() {
+        let dispatch_event = |events: &mut Vec<SseEvent>,
+                              event_type: &mut Option<String>,
+                              id: &mut Option<String>,
+                              retry: &mut Option<u64>,
+                              data_lines: &mut Vec<String>| {
+            if !data_lines.is_empty() || event_type.is_some() {
                 let combined_data = data_lines.join("\n");
                 let is_json = (combined_data.starts_with('{') && combined_data.ends_with('}'))
                     || (combined_data.starts_with('[') && combined_data.ends_with(']'));
 
                 events.push(SseEvent {
-                    event_type: current_event_type,
-                    id: current_id,
-                    retry_ms: current_retry,
+                    event_type: event_type.take(),
+                    id: id.take(),
+                    retry_ms: *retry,
                     data: combined_data,
                     is_json,
                 });
+                data_lines.clear();
+            }
+        };
+
+        for line in text.lines() {
+            let trimmed_line = line.trim_end_matches('\r');
+            if trimmed_line.is_empty() {
+                // Empty line triggers event dispatch
+                dispatch_event(
+                    &mut events,
+                    &mut current_event_type,
+                    &mut current_id,
+                    &mut current_retry,
+                    &mut data_lines,
+                );
+                continue;
+            }
+
+            if trimmed_line.starts_with(':') {
+                // Comment line per W3C spec
+                continue;
+            }
+
+            if let Some(rest) = trimmed_line.strip_prefix("data:") {
+                let d = rest.strip_prefix(' ').unwrap_or(rest);
+                data_lines.push(d.to_string());
+            } else if let Some(rest) = trimmed_line.strip_prefix("event:") {
+                current_event_type = Some(rest.trim().to_string());
+            } else if let Some(rest) = trimmed_line.strip_prefix("id:") {
+                current_id = Some(rest.trim().to_string());
+            } else if let Some(rest) = trimmed_line.strip_prefix("retry:") {
+                current_retry = rest.trim().parse::<u64>().ok();
             }
         }
+
+        // Flush any trailing event without terminal newline
+        dispatch_event(
+            &mut events,
+            &mut current_event_type,
+            &mut current_id,
+            &mut current_retry,
+            &mut data_lines,
+        );
 
         events
     }
@@ -166,5 +185,16 @@ mod tests {
         assert_eq!(events.len(), 1);
         let extracted = SseParser::extract_ai_stream_text(&events);
         assert_eq!(extracted, "She said: \"Hello!\"\n");
+    }
+
+    #[test]
+    fn test_crlf_delimited_sse_stream() {
+        let raw = b": comment\r\ndata: event1\r\n\r\n: comment2\r\nevent: custom\r\ndata: line1\r\ndata: line2\r\n\r\n";
+        let events = SseParser::parse_stream(raw);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, "event1");
+        assert_eq!(events[0].event_type, None);
+        assert_eq!(events[1].data, "line1\nline2");
+        assert_eq!(events[1].event_type.as_deref(), Some("custom"));
     }
 }

@@ -57,6 +57,7 @@ fn test_integration_har_to_openapi_schema_inference() {
                     })
                     .to_string(),
                 ),
+                encoding: None,
             },
             redirect_url: "".to_string(),
             headers_size: 100,
@@ -159,6 +160,7 @@ fn test_integration_security_auditor_critical_findings() {
                 size: 60,
                 mime_type: "application/json".to_string(),
                 text: Some(r#"{"status": "ok", "backup_key": "AKIAIOSFODNN7EXAMPLE"}"#.to_string()),
+                encoding: None,
             },
             redirect_url: "".to_string(),
             headers_size: 150,

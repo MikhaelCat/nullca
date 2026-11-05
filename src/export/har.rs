@@ -5,6 +5,8 @@
 
 use crate::engine::event::{Direction, TlsEvent};
 use crate::proto::http1::{Http1Message, Http1Parser};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -99,6 +101,8 @@ pub struct HarContent {
     #[serde(rename = "mimeType")]
     pub mime_type: String,
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -140,6 +144,11 @@ impl HarExporter {
                         format!("https://{}{}", host, uri)
                     };
 
+                    let req_mime = headers
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_else(|| "application/octet-stream".into());
+
                     let har_headers = headers
                         .into_iter()
                         .map(|(k, v)| HarHeader { name: k, value: v })
@@ -147,12 +156,32 @@ impl HarExporter {
 
                     let post_data = if !body.is_empty() {
                         Some(HarPostData {
-                            mime_type: "application/octet-stream".into(),
+                            mime_type: req_mime,
                             text: String::from_utf8_lossy(&body).to_string(),
                         })
                     } else {
                         None
                     };
+
+                    let mut query_string = Vec::new();
+                    if let Some((_, qs)) = full_url.split_once('?') {
+                        for param in qs.split('&') {
+                            if param.is_empty() {
+                                continue;
+                            }
+                            if let Some((k, v)) = param.split_once('=') {
+                                query_string.push(HarQueryParam {
+                                    name: k.to_string(),
+                                    value: v.to_string(),
+                                });
+                            } else {
+                                query_string.push(HarQueryParam {
+                                    name: param.to_string(),
+                                    value: String::new(),
+                                });
+                            }
+                        }
+                    }
 
                     let body_len = body.len() as i64;
                     let har_req = HarRequest {
@@ -160,7 +189,7 @@ impl HarExporter {
                         url: full_url,
                         http_version: version,
                         headers: har_headers,
-                        query_string: Vec::new(),
+                        query_string,
                         post_data,
                         headers_size: -1,
                         body_size: body_len,
@@ -198,6 +227,24 @@ impl HarExporter {
 
                     let latency_ms = event.latency_us.unwrap_or(1000) as f64 / 1000.0;
 
+                    let resp_mime = resp_headers
+                        .get("content-type")
+                        .cloned()
+                        .unwrap_or_else(|| "text/plain".into());
+
+                    let (content_text, encoding) = if body.is_empty() {
+                        (None, None)
+                    } else {
+                        match std::str::from_utf8(&body) {
+                            Ok(valid_utf8) => (Some(valid_utf8.to_string()), None),
+                            Err(_) => {
+                                // Binary data: RFC HAR 1.2 base64 encoding
+                                let b64 = BASE64_STANDARD.encode(&body);
+                                (Some(b64), Some("base64".to_string()))
+                            }
+                        }
+                    };
+
                     let har_resp = HarResponse {
                         status,
                         status_text,
@@ -208,8 +255,9 @@ impl HarExporter {
                             .collect(),
                         content: HarContent {
                             size: body.len() as i64,
-                            mime_type: "text/plain".into(),
-                            text: Some(String::from_utf8_lossy(&body).to_string()),
+                            mime_type: resp_mime,
+                            text: content_text,
+                            encoding,
                         },
                         redirect_url: "".into(),
                         headers_size: -1,

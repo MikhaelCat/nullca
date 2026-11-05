@@ -262,18 +262,24 @@ impl DnsParser {
                     .unwrap_or_else(|| ("<malformed>".into(), 0));
                 target_name
             }
+            DnsRecordType::Mx if rdlength >= 2 => {
+                let preference = u16::from_be_bytes([rdata_slice[0], rdata_slice[1]]);
+                let (exchange, _) = Self::read_domain_name(data, offset + 2)
+                    .unwrap_or_else(|| ("<malformed>".into(), 0));
+                format!("{} {}", preference, exchange)
+            }
             DnsRecordType::Txt => {
-                // Character string: length prefix followed by text
-                if !rdata_slice.is_empty() {
-                    let txt_len = rdata_slice[0] as usize;
-                    if txt_len < rdata_slice.len() {
-                        String::from_utf8_lossy(&rdata_slice[1..1 + txt_len]).to_string()
-                    } else {
-                        String::from_utf8_lossy(&rdata_slice[1..]).to_string()
-                    }
-                } else {
-                    String::new()
+                // RFC 1035 §3.3.14: one or more <character-string> entries
+                let mut cur = 0;
+                let mut parts = Vec::new();
+                while cur < rdata_slice.len() {
+                    let seg_len = rdata_slice[cur] as usize;
+                    cur += 1;
+                    let seg_end = (cur + seg_len).min(rdata_slice.len());
+                    parts.push(String::from_utf8_lossy(&rdata_slice[cur..seg_end]));
+                    cur = seg_end;
                 }
+                parts.join("")
             }
             _ => {
                 // Hex string fallback
@@ -427,5 +433,56 @@ mod tests {
         assert_eq!(msg.answers[0].rtype, DnsRecordType::A);
         assert_eq!(msg.answers[0].ttl, 300);
         assert_eq!(msg.answers[0].rdata, "93.184.216.34");
+    }
+
+    #[test]
+    fn test_parse_dns_multi_segment_txt_and_mx() {
+        // Response with TXT (2 chunks: "v=spf1 " and "include:_spf.google.com")
+        // and MX (preference 10, exchange "mail.google.com")
+        let mut raw = vec![
+            0x99, 0x99, // ID
+            0x81, 0x80, // Response
+            0x00, 0x00, // QDCOUNT: 0
+            0x00, 0x02, // ANCOUNT: 2
+            0x00, 0x00, // NSCOUNT: 0
+            0x00, 0x00, // ARCOUNT: 0
+        ];
+
+        // Answer 1: TXT record for "example.com"
+        raw.extend_from_slice(&[
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00,
+        ]);
+        raw.extend_from_slice(&[0x00, 0x10]); // TYPE: TXT (16)
+        raw.extend_from_slice(&[0x00, 0x01]); // CLASS: IN (1)
+        raw.extend_from_slice(&[0x00, 0x00, 0x0e, 0x10]); // TTL: 3600
+        let txt1 = b"v=spf1 ";
+        let txt2 = b"include:_spf.google.com ~all";
+        let rdlength = (1 + txt1.len() + 1 + txt2.len()) as u16;
+        raw.extend_from_slice(&rdlength.to_be_bytes());
+        raw.push(txt1.len() as u8);
+        raw.extend_from_slice(txt1);
+        raw.push(txt2.len() as u8);
+        raw.extend_from_slice(txt2);
+
+        // Answer 2: MX record for "example.com" (preference 10, mail.google.com)
+        raw.extend_from_slice(&[0xC0, 0x0C]); // Name pointer
+        raw.extend_from_slice(&[0x00, 0x0F]); // TYPE: MX (15)
+        raw.extend_from_slice(&[0x00, 0x01]); // CLASS: IN (1)
+        raw.extend_from_slice(&[0x00, 0x00, 0x0e, 0x10]); // TTL: 3600
+        let mut mx_rdata = Vec::new();
+        mx_rdata.extend_from_slice(&10u16.to_be_bytes());
+        mx_rdata.extend_from_slice(&[
+            0x04, b'm', b'a', b'i', b'l', 0x06, b'g', b'o', b'o', b'g', b'l', b'e', 0x03, b'c',
+            b'o', b'm', 0x00,
+        ]);
+        raw.extend_from_slice(&(mx_rdata.len() as u16).to_be_bytes());
+        raw.extend_from_slice(&mx_rdata);
+
+        let msg = DnsParser::parse(&raw).expect("Must parse DNS response");
+        assert_eq!(msg.answers.len(), 2);
+        assert_eq!(msg.answers[0].rtype, DnsRecordType::Txt);
+        assert_eq!(msg.answers[0].rdata, "v=spf1 include:_spf.google.com ~all");
+        assert_eq!(msg.answers[1].rtype, DnsRecordType::Mx);
+        assert_eq!(msg.answers[1].rdata, "10 mail.google.com");
     }
 }

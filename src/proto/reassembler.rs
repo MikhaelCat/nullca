@@ -117,11 +117,16 @@ impl StreamReassembler {
     }
 
     fn detect_http1_complete(data: &[u8]) -> Option<usize> {
-        let text = String::from_utf8_lossy(data);
-        let header_end = text.find("\r\n\r\n")?;
-        let headers_len = header_end + 4;
+        let (header_end, headers_len) =
+            if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                (pos, pos + 4)
+            } else {
+                let pos = data.windows(2).position(|w| w == b"\n\n")?;
+                (pos, pos + 2)
+            };
 
-        let first_line = text.lines().next().unwrap_or("");
+        let header_text = String::from_utf8_lossy(&data[..header_end]);
+        let first_line = header_text.lines().next().unwrap_or("");
         let is_response = first_line.starts_with("HTTP/");
 
         // RFC 7230 §3.3.3: 1xx, 204, and 304 responses MUST NOT include a message-body
@@ -141,11 +146,12 @@ impl StreamReassembler {
         let mut is_chunked = false;
         let mut is_close = false;
 
-        for line in text[..header_end].lines() {
+        for line in header_text.lines() {
             if let Some((k, v)) = line.split_once(':') {
                 let key = k.trim().to_lowercase();
                 if key == "content-length" {
-                    content_length = v.trim().parse::<usize>().ok();
+                    let clean = v.split(',').next().unwrap_or("").trim();
+                    content_length = clean.parse::<usize>().ok();
                 } else if key == "transfer-encoding" && v.to_lowercase().contains("chunked") {
                     is_chunked = true;
                 } else if key == "connection" && v.to_lowercase().contains("close") {
@@ -155,12 +161,7 @@ impl StreamReassembler {
         }
 
         if is_chunked {
-            // Check for chunked termination: "0\r\n\r\n"
-            if text[headers_len..].contains("0\r\n\r\n") {
-                let term_pos = text[headers_len..].find("0\r\n\r\n").unwrap();
-                return Some(headers_len + term_pos + 5);
-            }
-            return None;
+            return Self::find_chunked_end(data, headers_len);
         }
 
         if let Some(cl) = content_length {
@@ -180,6 +181,41 @@ impl StreamReassembler {
 
         // If no body expected (e.g. standard GET/HEAD request without body)
         Some(headers_len)
+    }
+
+    /// Walk chunked transfer boundaries (RFC 7230 §4.1).
+    /// Immune to false-positive terminal matches inside chunk payloads and supports trailers.
+    fn find_chunked_end(data: &[u8], mut offset: usize) -> Option<usize> {
+        while offset < data.len() {
+            // Find CRLF of chunk size line
+            let line_end = data[offset..].windows(2).position(|w| w == b"\r\n")?;
+            let size_line = std::str::from_utf8(&data[offset..offset + line_end]).ok()?;
+            let size_str = size_line.trim().split(';').next().unwrap_or("");
+            let chunk_size = usize::from_str_radix(size_str, 16).ok()?;
+            offset += line_end + 2;
+
+            if chunk_size == 0 {
+                // Terminal 0-chunk
+                if offset + 2 <= data.len() && &data[offset..offset + 2] == b"\r\n" {
+                    return Some(offset + 2);
+                }
+                if let Some(trailer_end) = data[offset..].windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    return Some(offset + trailer_end + 4);
+                }
+                return None;
+            }
+
+            let chunk_end = offset.checked_add(chunk_size)?;
+            if chunk_end + 2 > data.len() {
+                return None;
+            }
+            if &data[chunk_end..chunk_end + 2] != b"\r\n" {
+                return None;
+            }
+            offset = chunk_end + 2;
+        }
+        None
     }
 
     /// Flushes and returns any remaining buffered data for a closed connection (RFC 7230 §3.3.3 EOF termination).

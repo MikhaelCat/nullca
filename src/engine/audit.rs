@@ -42,6 +42,7 @@ pub enum AuditCategory {
     ServerInformationLeak,
     SecretLeak,
     JwtVulnerability,
+    HttpRequestSmuggling,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -495,6 +496,47 @@ impl SecurityAuditor {
                 check_jwt_candidate(&s.raw_token);
             }
         }
+
+        // 10. HTTP Request Smuggling & Desync Checks (RFC 7230 §3.3.3 / CWE-444)
+        let has_te = req_headers.contains_key("transfer-encoding");
+        let has_cl = req_headers.contains_key("content-length");
+        if has_te && has_cl {
+            findings.push(AuditFinding {
+                severity: AuditSeverity::Critical,
+                category: AuditCategory::HttpRequestSmuggling,
+                title: "HTTP Request Smuggling Risk (TE.CL / CL.TE Desync)".to_string(),
+                endpoint: endpoint.to_string(),
+                description: "Request specifies both 'Transfer-Encoding' and 'Content-Length' headers, enabling HTTP desynchronization and cache poisoning attacks (RFC 7230 §3.3.3).".to_string(),
+                remediation: "Remove either Transfer-Encoding or Content-Length. Reject ambiguous requests at the edge proxy.".to_string(),
+            });
+        }
+
+        if let Some(risk) = req_headers.get("x-nullca-smuggling-risk") {
+            if risk == "conflicting-content-length" {
+                findings.push(AuditFinding {
+                    severity: AuditSeverity::Critical,
+                    category: AuditCategory::HttpRequestSmuggling,
+                    title: "Conflicting Content-Length Headers (CL.CL Request Smuggling)".to_string(),
+                    endpoint: endpoint.to_string(),
+                    description: "Request contains multiple or conflicting 'Content-Length' headers, allowing request smuggling bypass of reverse proxy routing (RFC 7230 §3.3.2).".to_string(),
+                    remediation: "Reject requests with multiple Content-Length headers with HTTP 400 Bad Request.".to_string(),
+                });
+            }
+        }
+
+        if let Some(te) = req_headers.get("transfer-encoding") {
+            let lower = te.to_ascii_lowercase();
+            if lower.contains("chunked") && lower != "chunked" {
+                findings.push(AuditFinding {
+                    severity: AuditSeverity::High,
+                    category: AuditCategory::HttpRequestSmuggling,
+                    title: "Obfuscated Transfer-Encoding Header".to_string(),
+                    endpoint: endpoint.to_string(),
+                    description: format!("Transfer-Encoding value '{}' uses non-standard framing or chaining, often used to bypass WAFs.", te),
+                    remediation: "Normalize or reject non-standard Transfer-Encoding headers at the gateway.".to_string(),
+                });
+            }
+        }
     }
 
     /// Prints a formatted audit report to standard output.
@@ -606,6 +648,7 @@ mod tests {
                     size: 100,
                     mime_type: "text/html".to_string(),
                     text: Some("<html><body>Login</body></html>".to_string()),
+                    encoding: None,
                 },
                 redirect_url: "".to_string(),
                 headers_size: 100,
@@ -670,6 +713,7 @@ mod tests {
                     size: 20,
                     mime_type: "application/json".to_string(),
                     text: Some(r#"{"user": "alice"}"#.to_string()),
+                    encoding: None,
                 },
                 redirect_url: "".to_string(),
                 headers_size: 100,
@@ -725,6 +769,7 @@ mod tests {
                     size: 15,
                     mime_type: "application/json".to_string(),
                     text: Some(r#"{"status":"ok"}"#.to_string()),
+                    encoding: None,
                 },
                 redirect_url: "".to_string(),
                 headers_size: 50,

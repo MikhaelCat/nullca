@@ -504,6 +504,7 @@ mod tests {
                     size: 45,
                     mime_type: "application/json".to_string(),
                     text: Some(r#"{"id": 42, "name": "Bob"}"#.to_string()),
+                    encoding: None,
                 },
                 redirect_url: "".to_string(),
                 headers_size: 80,

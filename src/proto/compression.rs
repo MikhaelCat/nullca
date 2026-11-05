@@ -89,34 +89,40 @@ impl Decompressor {
         }
     }
 
+    pub const MAX_DECOMPRESSED_SIZE: usize = 32 * 1024 * 1024; // 32 MB guard limit
+
     /// Decompresses RFC 7932 Brotli data.
     pub fn decompress_brotli(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let mut decompressor = brotli::Decompressor::new(data, 4096);
+        let decompressor = brotli::Decompressor::new(data, 4096);
         let mut out = Vec::new();
-        decompressor.read_to_end(&mut out)?;
+        let mut reader = decompressor.take(Self::MAX_DECOMPRESSED_SIZE as u64);
+        reader.read_to_end(&mut out)?;
         Ok(out)
     }
 
     /// Decompresses RFC 1952 Gzip data using flate2.
     pub fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let mut decoder = flate2::read::GzDecoder::new(data);
+        let decoder = flate2::read::GzDecoder::new(data);
         let mut out = Vec::new();
-        decoder.read_to_end(&mut out)?;
+        let mut reader = decoder.take(Self::MAX_DECOMPRESSED_SIZE as u64);
+        reader.read_to_end(&mut out)?;
         Ok(out)
     }
 
     /// Decompresses RFC 1950/1951 Zlib/Deflate data.
     pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         // Try Zlib first (with 2-byte header)
-        let mut zlib_decoder = flate2::read::ZlibDecoder::new(data);
+        let zlib_decoder = flate2::read::ZlibDecoder::new(data);
         let mut out = Vec::new();
-        if zlib_decoder.read_to_end(&mut out).is_ok() && !out.is_empty() {
+        let mut zlib_reader = zlib_decoder.take(Self::MAX_DECOMPRESSED_SIZE as u64);
+        if zlib_reader.read_to_end(&mut out).is_ok() && !out.is_empty() {
             return Ok(out);
         }
         // Fallback to raw Deflate (without zlib header, e.g. WebSocket permessage-deflate)
-        let mut deflate_decoder = flate2::read::DeflateDecoder::new(data);
+        let deflate_decoder = flate2::read::DeflateDecoder::new(data);
         let mut out_raw = Vec::new();
-        deflate_decoder.read_to_end(&mut out_raw)?;
+        let mut deflate_reader = deflate_decoder.take(Self::MAX_DECOMPRESSED_SIZE as u64);
+        deflate_reader.read_to_end(&mut out_raw)?;
         Ok(out_raw)
     }
 

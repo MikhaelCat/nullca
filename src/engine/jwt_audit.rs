@@ -69,8 +69,8 @@ impl JwtAuditor {
             return None;
         }
 
-        let header_bytes = URL_SAFE_NO_PAD.decode(parts[0]).ok()?;
-        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+        let header_bytes = Self::decode_base64_flexible(parts[0])?;
+        let payload_bytes = Self::decode_base64_flexible(parts[1])?;
 
         let header_str = String::from_utf8(header_bytes).ok()?;
         let payload_str = String::from_utf8(payload_bytes).ok()?;
@@ -122,9 +122,26 @@ impl JwtAuditor {
             });
         }
 
+        // Check "nbf" (Not Before in the future)
+        if let Some(nbf_str) = Self::extract_json_number_field(&payload_str, "nbf") {
+            if let Ok(nbf_sec) = nbf_str.parse::<u64>() {
+                if nbf_sec > now_sec + 60 {
+                    vulnerabilities.push(JwtVulnerability {
+                        severity: JwtVulnerabilitySeverity::Medium,
+                        title: "Premature JWT Token (nbf in future)".into(),
+                        description: format!(
+                            "Token is not valid yet; 'nbf' is {} seconds into the future.",
+                            nbf_sec.saturating_sub(now_sec)
+                        ),
+                        recommendation: "Check server clock synchronization or reject tokens used before nbf timestamp.".into(),
+                    });
+                }
+            }
+        }
+
         // 4. Vulnerability: Offline HMAC-SHA256 Dictionary Cracking
         if alg.eq_ignore_ascii_case("HS256") && !parts[2].is_empty() {
-            if let Ok(signature_bytes) = URL_SAFE_NO_PAD.decode(parts[2]) {
+            if let Some(signature_bytes) = Self::decode_base64_flexible(parts[2]) {
                 let signing_input = format!("{}.{}", parts[0], parts[1]);
                 for &candidate in COMMON_WEAK_JWT_SECRETS {
                     let expected_hmac =
@@ -152,6 +169,21 @@ impl JwtAuditor {
             payload_json: payload_str,
             vulnerabilities,
         })
+    }
+
+    /// Flexible base64/base64url decoder supporting standard and unpadded variants.
+    pub fn decode_base64_flexible(s: &str) -> Option<Vec<u8>> {
+        let clean = s.trim();
+        if let Ok(b) = URL_SAFE_NO_PAD.decode(clean) {
+            return Some(b);
+        }
+        if let Ok(b) = base64::engine::general_purpose::URL_SAFE.decode(clean) {
+            return Some(b);
+        }
+        if let Ok(b) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(clean) {
+            return Some(b);
+        }
+        base64::engine::general_purpose::STANDARD.decode(clean).ok()
     }
 
     /// Zero-dependency RFC 2104 HMAC-SHA256 implementation.

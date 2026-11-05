@@ -22,25 +22,56 @@ pub struct Http1Parser;
 
 impl Http1Parser {
     pub fn parse(payload: &[u8]) -> Option<Http1Message> {
-        let text = String::from_utf8_lossy(payload);
-        let header_end = text.find("\r\n\r\n")?;
+        // Zero-allocation byte boundary search to avoid offset drift with non-ASCII headers
+        let (header_end, body_start) =
+            if let Some(pos) = payload.windows(4).position(|w| w == b"\r\n\r\n") {
+                (pos, pos + 4)
+            } else {
+                let pos = payload.windows(2).position(|w| w == b"\n\n")?;
+                (pos, pos + 2)
+            };
 
-        let header_part = &text[..header_end];
-        let body_start = header_end + 4;
+        let header_part = String::from_utf8_lossy(&payload[..header_end]);
         let raw_body = if body_start < payload.len() {
-            payload[body_start..].to_vec()
+            &payload[body_start..]
         } else {
-            Vec::new()
+            &[]
         };
 
         let mut lines = header_part.lines();
         let start_line = lines.next()?.trim();
 
         let mut headers = HashMap::new();
+        let mut conflicting_content_length = false;
+
         for line in lines {
             if let Some((k, v)) = line.split_once(':') {
-                headers.insert(k.trim().to_lowercase(), v.trim().to_string());
+                let key = k.trim().to_lowercase();
+                let val = v.trim().to_string();
+
+                if key == "content-length" {
+                    // Check for duplicate / conflicting Content-Length headers (CL.CL smuggling)
+                    if let Some(existing) = headers.get("content-length") {
+                        if existing != &val {
+                            conflicting_content_length = true;
+                        }
+                    }
+                    if val.contains(',') {
+                        let parts: Vec<&str> = val.split(',').map(|s| s.trim()).collect();
+                        if parts.windows(2).any(|w| w[0] != w[1]) {
+                            conflicting_content_length = true;
+                        }
+                    }
+                }
+                headers.insert(key, val);
             }
+        }
+
+        if conflicting_content_length {
+            headers.insert(
+                "x-nullca-smuggling-risk".to_string(),
+                "conflicting-content-length".to_string(),
+            );
         }
 
         // Check if Response (starts with HTTP/)
@@ -55,7 +86,7 @@ impl Http1Parser {
                     String::new()
                 };
 
-                let body = Self::process_body(&headers, &raw_body);
+                let body = Self::process_body(&headers, raw_body);
 
                 return Some(Http1Message::Response {
                     version,
@@ -73,7 +104,7 @@ impl Http1Parser {
                 let uri = parts[1].to_string();
                 let version = parts[2].to_string();
 
-                let body = Self::process_body(&headers, &raw_body);
+                let body = Self::process_body(&headers, raw_body);
 
                 return Some(Http1Message::Request {
                     method,
@@ -92,6 +123,14 @@ impl Http1Parser {
         if let Some(te) = headers.get("transfer-encoding") {
             if te.to_lowercase().contains("chunked") {
                 return Self::decode_chunked(raw_body);
+            }
+        }
+        if let Some(cl_str) = headers.get("content-length") {
+            let clean_cl = cl_str.split(',').next().unwrap_or("").trim();
+            if let Ok(cl) = clean_cl.parse::<usize>() {
+                if cl < raw_body.len() {
+                    return raw_body[..cl].to_vec();
+                }
             }
         }
         raw_body.to_vec()
@@ -184,6 +223,39 @@ mod tests {
             assert_eq!(String::from_utf8_lossy(&body), "MozillaDeveloper");
         } else {
             panic!("Expected Response");
+        }
+    }
+
+    #[test]
+    fn test_parse_http1_non_ascii_header_offset_safety() {
+        // Contains invalid UTF-8 byte 0xFF inside header, followed by exact body
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"POST /upload HTTP/1.1\r\nHost: example.com\r\nX-Custom: ");
+        raw.push(0xFF); // Invalid UTF-8 byte
+        raw.extend_from_slice(b"\r\nContent-Length: 4\r\n\r\nTEST");
+
+        let parsed = Http1Parser::parse(&raw).expect("Must parse despite non-ascii header");
+        if let Http1Message::Request { body, .. } = parsed {
+            assert_eq!(
+                &body, b"TEST",
+                "Body bytes must not be shifted by non-ASCII replacement"
+            );
+        } else {
+            panic!("Expected Request");
+        }
+    }
+
+    #[test]
+    fn test_parse_http1_conflicting_content_length_detection() {
+        let raw = b"POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nContent-Length: 10\r\n\r\n12345";
+        let parsed = Http1Parser::parse(raw).expect("Should parse");
+        if let Http1Message::Request { headers, .. } = parsed {
+            assert_eq!(
+                headers.get("x-nullca-smuggling-risk").map(|s| s.as_str()),
+                Some("conflicting-content-length")
+            );
+        } else {
+            panic!("Expected Request");
         }
     }
 }

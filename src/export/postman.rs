@@ -253,6 +253,7 @@ impl PostmanExporter {
                             size: 0,
                             mime_type: "text/plain".into(),
                             text: None,
+                            encoding: None,
                         },
                         redirect_url: String::new(),
                         headers_size: 0,

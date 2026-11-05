@@ -107,7 +107,7 @@ impl GraphQLSynthesizer {
         // Infer fields from response "data" object
         if let Some(data) = res_json.get("data").and_then(|d| d.as_object()) {
             for (root_field, val) in data {
-                let inferred_type = Self::infer_type(schema, root_field, val);
+                let inferred_type = Self::infer_type(schema, root_field, val, 0);
                 if is_mutation {
                     schema
                         .mutation_fields
@@ -121,7 +121,18 @@ impl GraphQLSynthesizer {
         }
     }
 
-    fn infer_type(schema: &mut GraphQLSchema, field_name: &str, val: &Value) -> GqlFieldType {
+    pub const MAX_GQL_DEPTH: usize = 32;
+
+    fn infer_type(
+        schema: &mut GraphQLSchema,
+        field_name: &str,
+        val: &Value,
+        depth: usize,
+    ) -> GqlFieldType {
+        if depth >= Self::MAX_GQL_DEPTH {
+            return GqlFieldType::String;
+        }
+
         match val {
             Value::Null => GqlFieldType::String,
             Value::Bool(_) => GqlFieldType::Boolean,
@@ -151,7 +162,7 @@ impl GraphQLSynthesizer {
             }
             Value::Array(arr) => {
                 let inner = if let Some(first) = arr.first() {
-                    Self::infer_type(schema, field_name, first)
+                    Self::infer_type(schema, field_name, first, depth + 1)
                 } else {
                     GqlFieldType::String
                 };
@@ -162,7 +173,7 @@ impl GraphQLSynthesizer {
                 let type_name = Self::to_pascal_case(field_name);
                 let mut fields = BTreeMap::new();
                 for (k, v) in map {
-                    let field_type = Self::infer_type(schema, k, v);
+                    let field_type = Self::infer_type(schema, k, v, depth + 1);
                     fields.insert(k.clone(), field_type);
                 }
 

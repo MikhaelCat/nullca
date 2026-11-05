@@ -198,18 +198,29 @@ impl WebSocketParser {
             } else {
                 (None, false)
             }
-        } else if opcode == WebSocketOpcode::Close && unmasked.len() >= 2 {
-            let code = u16::from_be_bytes([unmasked[0], unmasked[1]]);
-            let desc = WebSocketCloseDetails::description_for_code(code);
-            let reason = if unmasked.len() > 2 {
-                String::from_utf8_lossy(&unmasked[2..]).to_string()
+        } else if opcode == WebSocketOpcode::Close {
+            if unmasked.len() >= 2 {
+                let code = u16::from_be_bytes([unmasked[0], unmasked[1]]);
+                let desc = WebSocketCloseDetails::description_for_code(code);
+                let reason = if unmasked.len() > 2 {
+                    String::from_utf8_lossy(&unmasked[2..]).to_string()
+                } else {
+                    String::new()
+                };
+                (
+                    Some(format!("Code {} ({}) - Reason: {}", code, desc, reason)),
+                    false,
+                )
+            } else if unmasked.is_empty() {
+                // RFC 6455 §7.1.5: If no status code was received, code is 1005 (No Status Received)
+                (Some("Code 1005 (No Status Received)".into()), false)
             } else {
-                String::new()
-            };
-            (
-                Some(format!("Code {} ({}) - Reason: {}", code, desc, reason)),
-                false,
-            )
+                // RFC 6455 §5.5.1: 1-byte close payload is an invalid protocol error
+                (
+                    Some("Protocol Error: Invalid Close payload length (1 byte)".into()),
+                    false,
+                )
+            }
         } else {
             (None, false)
         };
@@ -317,15 +328,31 @@ impl WebSocketParser {
 }
 
 /// Multi-frame message assembler for defragmenting split WebSocket messages.
-#[derive(Default)]
 pub struct WebSocketAssembler {
     current_opcode: Option<WebSocketOpcode>,
     buffer: Vec<u8>,
+    max_message_size: usize,
+}
+
+impl Default for WebSocketAssembler {
+    fn default() -> Self {
+        Self::with_max_size(Self::DEFAULT_MAX_MESSAGE_SIZE)
+    }
 }
 
 impl WebSocketAssembler {
+    pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_max_size(max_size: usize) -> Self {
+        Self {
+            current_opcode: None,
+            buffer: Vec::new(),
+            max_message_size: max_size,
+        }
     }
 
     /// Process a frame. Returns `Some((opcode, complete_payload))` if message is complete.
@@ -343,6 +370,12 @@ impl WebSocketAssembler {
                 }
             }
             WebSocketOpcode::Continuation => {
+                // Protect against memory exhaustion from unbounded fragmented streams
+                if self.buffer.len().saturating_add(frame.payload.len()) > self.max_message_size {
+                    self.buffer.clear();
+                    self.current_opcode = None;
+                    return None;
+                }
                 self.buffer.extend_from_slice(&frame.payload);
                 if frame.fin {
                     let opcode = self.current_opcode.take().unwrap_or(WebSocketOpcode::Text);

@@ -12,9 +12,9 @@
 This document certifies the execution of an exhaustive Quality Assurance (QA) and stress-testing campaign for **NullCA** under adverse, boundary, and real-world production conditions.
 
 ### Test Metrics Overview:
-- **Total Automated Test Suites:** 13 test suites (1 library unit suite + 12 end-to-end integration suites)
-- **Total Tests Executed:** **123 tests**
-- **Pass Rate:** **100% (123 passed, 0 failed, 0 ignored)**
+- **Total Automated Test Suites:** 14 test suites (1 library unit suite + 13 end-to-end integration suites)
+- **Total Tests Executed:** **137 tests**
+- **Pass Rate:** **100% (137 passed, 0 failed, 0 ignored)**
 - **Static Analysis (`cargo clippy --all -- -D warnings`):** **0 warnings**
 - **Code Formatting (`cargo fmt --check`):** **100% Compliant**
 - **Release Profile Verification (`cargo test --release --all`):** **100% Passed**
@@ -66,10 +66,56 @@ During this deep QA session, four subtle edge cases were detected and permanentl
 
 ---
 
-## 4. Test Suite Inventory
+## 4. Deep Micro-Bug & Protocol Edge-Case Hunting & Remediations
+
+In this second comprehensive QA cycle, 10 nuanced protocol compliance bugs, memory boundary edge cases, and parsing inconsistencies were uncovered and permanently resolved:
+
+### 1. Server-Sent Events (SSE) CRLF Delimitation Failure
+- **Root Cause:** `SseParser::parse_stream` split events on `\n\n`. Under standard HTTP/1.1 CRLF (`\r\n\r\n`), the sequence `\n\n` is not contiguous (it is `\r\n\r\n`), causing the parser to treat entire streams as a single giant event.
+- **Fix:** Refactored [`src/proto/sse.rs`](file:///home/mihail/projects/nullca/src/proto/sse.rs) to parse lines via `.lines()` and dispatch events on blank lines, honoring both CRLF and LF delimiters per the W3C EventSource specification.
+
+### 2. Multi-Segment DNS TXT (DKIM/SPF) & Standard MX Record Dissection
+- **Root Cause:** RFC 1035 §3.3.14 defines TXT RDATA as one or more `<character-string>` segments. Previous code parsed only the first segment and discarded remaining segments, corrupting large DKIM keys or SPF records. Additionally, MX records fell back to raw hex strings.
+- **Fix:** Implemented chunk loop across all `<character-string>` entries in [`src/proto/dns.rs`](file:///home/mihail/projects/nullca/src/proto/dns.rs) and added standard preference + exchange domain decoding for MX records.
+
+### 3. HTTP/1.1 Non-ASCII Header Offset Shift & Smuggling Hardening
+- **Root Cause:** Searching for `\r\n\r\n` on a `String::from_utf8_lossy` conversion caused byte offset drift whenever non-ASCII or invalid bytes were present in headers (replacement `\u{FFFD}` expands from 1 byte to 3 bytes), slicing into body payloads at shifted positions.
+- **Fix:** Switched to zero-allocation byte slice boundary search (`windows(4).position(|w| w == b"\r\n\r\n")`) in [`src/proto/http1.rs`](file:///home/mihail/projects/nullca/src/proto/http1.rs), added `Content-Length` body bounding, and flagged conflicting/duplicate `Content-Length` headers as `x-nullca-smuggling-risk`.
+
+### 4. HAR 1.2 Binary Payload Base64 Encoding & Query String Extraction
+- **Root Cause:** HAR 1.2 requires non-UTF-8 binary response bodies to be encoded with `encoding: "base64"`. Converting them via lossy UTF-8 destroyed raw binary images and compressed payloads. In addition, request `queryString` was left as an empty list.
+- **Fix:** Added `encoding: Option<String>` to `HarContent` in [`src/export/har.rs`](file:///home/mihail/projects/nullca/src/export/har.rs), automatically base64-encoding binary bodies, propagating `Content-Type` headers, and populating `HarRequest.query_string` from URL query parameters.
+
+### 5. False Terminal Match in Chunked Streams & Trailer Support
+- **Root Cause:** `StreamReassembler` used `text.contains("0\r\n\r\n")` to detect completion. If a chunk payload contained the byte sequence `0\r\n\r\n`, the reassembler prematurely cut off the message. Furthermore, chunked messages with HTTP trailers were never completed.
+- **Fix:** Replaced substring search in [`src/proto/reassembler.rs`](file:///home/mihail/projects/nullca/src/proto/reassembler.rs) with an iterative chunk walker `find_chunked_end` that respects chunk length fields and parses trailer headers.
+
+### 6. WebSocket Memory Exhaustion Protection & RFC 6455 0-Byte Close Status
+- **Root Cause:** `WebSocketAssembler` had no upper limit on message accumulation, allowing unbounded continuation frames to consume heap memory. Additionally, Close frames without status codes were rendered as `None` instead of RFC 6455 §7.1.5 code 1005 ("No Status Received").
+- **Fix:** Enforced `DEFAULT_MAX_MESSAGE_SIZE` (16MB) ceiling in [`src/proto/websocket.rs`](file:///home/mihail/projects/nullca/src/proto/websocket.rs) and handled 0-byte and 1-byte Close frames according to RFC 6455.
+
+### 7. Flexible JWT Base64 Decoding & Temporal Anomaly Auditing
+- **Root Cause:** `JwtAuditor` failed on padded base64 (`=`) or standard base64 variants. Temporal validity checks did not verify whether `nbf` (not-before) was set in the future.
+- **Fix:** Introduced `decode_base64_flexible` in [`src/engine/jwt_audit.rs`](file:///home/mihail/projects/nullca/src/engine/jwt_audit.rs) and added detection for premature tokens whose `nbf` timestamp is in the future.
+
+### 8. HTTP Request Smuggling Vulnerability Detection in SecurityAuditor
+- **Root Cause:** Security posture auditor lacked detection for HTTP desync / request smuggling vectors (CWE-444).
+- **Fix:** Added `AuditCategory::HttpRequestSmuggling` to [`src/engine/audit.rs`](file:///home/mihail/projects/nullca/src/engine/audit.rs), identifying `TE.CL` / `CL.TE` ambiguities, obfuscated `Transfer-Encoding`, and conflicting `Content-Length` headers.
+
+### 9. GraphQL AST Synthesizer Recursion Limiter
+- **Root Cause:** Deeply nested JSON payloads (>100 levels) could cause stack overflow during recursive type inference.
+- **Fix:** Implemented `MAX_GQL_DEPTH = 32` boundary in [`src/export/graphql.rs`](file:///home/mihail/projects/nullca/src/export/graphql.rs) to safely cap recursion.
+
+### 10. Decompression Bomb Bounding
+- **Root Cause:** Unbounded streaming decompression in Gzip, Deflate, and Brotli could exhaust RAM when presented with malicious compression bombs.
+- **Fix:** Guarded decompressors with `Take` readers capped at `MAX_DECOMPRESSED_SIZE = 32MB` in [`src/proto/compression.rs`](file:///home/mihail/projects/nullca/src/proto/compression.rs).
+
+---
+
+## 5. Test Suite Inventory
 
 ```
-running 76 tests (src/lib.rs unit tests) ........................................ ok
+running 80 tests (src/lib.rs unit tests) ........................................ ok
 running 5 tests (tests/test_advanced_engine.rs) ................................ ok
 running 4 tests (tests/test_advanced_features.rs) .............................. ok
 running 6 tests (tests/test_dashboard_ui.rs) ................................... ok
@@ -78,11 +124,12 @@ running 2 tests (tests/test_hpack_engine.rs) ...................................
 running 1 test  (tests/test_ipc_stream.rs) ..................................... ok
 running 3 tests (tests/test_openapi_and_audit.rs) .............................. ok
 running 1 test  (tests/test_pcapng_export.rs) .................................. ok
+running 10 tests (tests/test_qa_micro_bugs.rs) ................................. ok
 running 10 tests (tests/test_qa_stress_and_edge_cases.rs) ...................... ok
 running 1 test  (tests/test_stream_reassembly.rs) .............................. ok
 running 5 tests (tests/test_websocket_engine.rs) ............................... ok
 running 2 tests (tests/test_x509_and_db.rs) .................................... ok
 running 9 tests (tests/test_x509_comprehensive.rs) ............................. ok
 
-Total: 123 passed, 0 failed, 0 ignored.
+Total: 137 passed, 0 failed, 0 ignored.
 ```
